@@ -6,14 +6,14 @@
  * les sites : il se commit dans git sans risque, il se met à jour comme n'importe quelle dépendance.
  * Aucune dépendance, aucun framework, PHP 7.4 ou plus (mutualisé compris).
  *
- * LA CLÉ N'EST PAS DANS CE FICHIER. Elle vient de l'environnement de production, variable LAMPARO_KEY
- * (« identifiant:secret »), définie dans le panneau d'hébergement, un SetEnv Apache, un fastcgi_param nginx ou
- * l'env[] de PHP-FPM ; et/ou du fichier lamparo-key.php posé à côté (exclu de git) :
- *     <?php return 'k_xxxxxxxx:secret';
- * Ce fichier de clé est lu comme du texte, jamais exécuté ; demandé depuis le web, il ne renvoie rien.
- * PLUSIEURS CLÉS quand plusieurs comptes lamparo surveillent le même site (un client et son agence, chacun
- * payant sa ligne) : séparées par des virgules dans LAMPARO_KEY, ou une par chaîne dans le fichier :
- *     <?php return ['k_xxxxxxxx:secret', 'k_yyyyyyyy:secret'];
+ * LA CLÉ N'EST PAS DANS CE FICHIER. Elle vient de l'environnement de production, dans une variable nommée
+ * d'après la clé — LAMPARO_KEY_09887C4F pour la clé k_09887c4f, valeur « identifiant:secret » — définie dans le
+ * panneau d'hébergement, un SetEnv Apache, un fastcgi_param nginx ou l'env[] de PHP-FPM ; et/ou dans un fichier
+ * nommé de même, lamparo-key-09887c4f.php, posé à côté (exclu de git) :
+ *     <?php return 'k_09887c4f:secret';
+ * Chaque compte lamparo qui surveille le site a ainsi sa variable ou son fichier, sans toucher à ceux des autres
+ * (un client et son agence, chacun payant sa ligne). LAMPARO_KEY et lamparo-key.php, sans suffixe, restent lus.
+ * Les fichiers de clé sont lus comme du texte, jamais exécutés ; demandés depuis le web, ils ne renvoient rien.
  * Chaque requête dit quelle clé elle porte (X-Lamparo-Key-Id) ; la lanterne répond avec celle-là, ou pas du tout.
  * Sans clé, la lanterne répond 404 : une préproduction ou une copie ne parle jamais.
  *
@@ -94,30 +94,33 @@ function lamparo_main(): void
 }
 
 // ---------------------------------------------------------------------------
-// Les clés : l'environnement et le fichier à côté, jamais ce fichier. Une clé par compte lamparo qui surveille
-// le site ; au plus LAMPARO_MAX_KEYS.
+// Les clés : l'environnement et les fichiers à côté, jamais ce fichier. Une variable ou un fichier par compte
+// lamparo qui surveille le site ; au plus LAMPARO_MAX_KEYS.
 // ---------------------------------------------------------------------------
 
 /**
- * Toutes les clés en place : celles de l'environnement, puis celles du fichier, sans doublon d'identifiant.
+ * Toutes les clés en place : chaque variable LAMPARO_KEY ou LAMPARO_KEY_xxx de l'environnement (REDIRECT_ compris,
+ * qu'Apache ajoute en réécriture), puis chaque fichier lamparo-key*.php à côté ; sans doublon d'identifiant.
  *
  * @return array<int, array{id: string, secret: string}>
  */
 function lamparo_load_keys(): array
 {
     $raw = [];
-    foreach (['LAMPARO_KEY', 'REDIRECT_LAMPARO_KEY'] as $name) {
-        $value = getenv($name);
-        if (!is_string($value) || $value === '') {
-            $value = isset($_SERVER[$name]) ? $_SERVER[$name] : (isset($_ENV[$name]) ? $_ENV[$name] : null);
-        }
-        if (is_string($value) && trim($value) !== '') {
-            $raw[] = $value;
+    $env = getenv();
+    foreach ([is_array($env) ? $env : [], $_SERVER, $_ENV] as $vars) {
+        foreach ($vars as $name => $value) {
+            if (is_string($name) && is_string($value) && trim($value) !== '' && preg_match('/^(REDIRECT_)?LAMPARO_KEY(_[A-Za-z0-9]+)?$/', $name) === 1) {
+                $raw[] = $value;
+            }
         }
     }
-    $file = lamparo_read_key_file(__DIR__ . '/lamparo-key.php');
-    if ($file !== null) {
-        $raw[] = $file;
+    $files = glob(__DIR__ . '/lamparo-key*.php');
+    foreach (is_array($files) ? array_slice($files, 0, LAMPARO_MAX_KEYS) : [] as $path) {
+        $file = lamparo_read_key_file($path);
+        if ($file !== null) {
+            $raw[] = $file;
+        }
     }
 
     return lamparo_parse_keys(implode(',', $raw));
