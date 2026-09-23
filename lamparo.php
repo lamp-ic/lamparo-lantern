@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.8.0
+ * @version 0.8.1
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.8.0');
+define('LAMPARO_PROBE_VERSION', '0.8.1');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -430,9 +430,17 @@ function lamparo_read_composer_lock(string $appRoot, array &$errors): array
         if (!isset($package['name'], $package['version'])) {
             continue;
         }
+        // L'hôte qui a distribué le paquet (dist.url) : packagist pour presque tous, repo.magento.com pour ce que
+        // Magento installe lui-même. Un nom d'hôte public, jamais l'adresse entière ni ce qu'elle pourrait porter.
+        $host = null;
+        if (isset($package['dist']['url']) && is_string($package['dist']['url'])) {
+            $host = parse_url($package['dist']['url'], PHP_URL_HOST);
+            $host = is_string($host) ? strtolower($host) : null;
+        }
         $packages[] = [
             'name'    => (string) $package['name'],
             'version' => ltrim((string) $package['version'], 'v'),
+            'host'    => $host,
             'source'  => 'composer.lock',
         ];
         if (count($packages) >= LAMPARO_MAX_PACKAGES) {
