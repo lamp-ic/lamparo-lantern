@@ -1,5 +1,9 @@
 # Journal des versions
 
+## 0.6.1 — 2026-09-23
+
+- Joomla : un paquet livré avec le cœur — le pack de langue en-GB, par exemple — n'a pas de ligne, comme les extensions du cœur.
+
 ## 0.6.0 — 2026-09-23
 
 - Joomla : les paquets (`administrator/manifests/packages/pkg_*.xml`) se lisent, avec leur version, leur serveur de
