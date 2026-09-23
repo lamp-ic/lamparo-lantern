@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.7.1
+ * @version 0.8.0
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.7.1');
+define('LAMPARO_PROBE_VERSION', '0.8.0');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -350,6 +350,7 @@ function lamparo_collect(array $root, array &$errors): array
         'lamparo_detect_drupal',
         'lamparo_detect_prestashop',
         'lamparo_detect_joomla',
+        'lamparo_detect_typo3',
     ];
 
     foreach ($detectors as $detector) {
@@ -735,6 +736,67 @@ function lamparo_xml_text(string $xml, string $tag): ?string
     $text = trim(html_entity_decode($m[1], ENT_QUOTES | ENT_XML1, 'UTF-8'));
 
     return $text === '' ? null : $text;
+}
+
+/**
+ * TYPO3. En mode composer, le cœur est le paquet typo3/cms-core, sous vendor/ à la racine du projet ; en mode
+ * classique, il vit dans typo3/sysext/core sous la racine web. Les deux portent Typo3Version.php et sa constante.
+ * Les extensions du mode classique se lisent dans typo3conf/ext/<clé>/ext_emconf.php ; en mode composer elles
+ * sont des paquets composer, déjà remontés dans « packages ».
+ */
+function lamparo_detect_typo3(array $root, array &$errors): ?array
+{
+    $candidates = [
+        $root['app'] . '/vendor/typo3/cms-core/Classes/Information/Typo3Version.php',
+        $root['web'] . '/typo3/sysext/core/Classes/Information/Typo3Version.php',
+    ];
+    foreach ($candidates as $candidate) {
+        if (!is_file($candidate)) {
+            continue;
+        }
+        $version = lamparo_match_in_file($candidate, '/const\s+VERSION\s*=\s*[\'"]([0-9.]+)/');
+        if ($version === null) {
+            continue;
+        }
+
+        return [
+            'cms' => [
+                'type'      => 'typo3',
+                'version'   => $version,
+                'detection' => strpos($candidate, '/vendor/') !== false ? 'vendor/typo3/cms-core' : 'typo3/sysext/core',
+            ],
+            'components' => lamparo_scan_typo3_extensions($root['web'], $errors),
+        ];
+    }
+
+    return null;
+}
+
+/** Les extensions d'un TYPO3 classique : une par dossier de typo3conf/ext, décrite par son ext_emconf.php — lu comme du texte, jamais inclus. */
+function lamparo_scan_typo3_extensions(string $web, array &$errors): array
+{
+    $components = [];
+    foreach (lamparo_list_dirs($web . '/typo3conf/ext') as $dir) {
+        $manifest = $web . '/typo3conf/ext/' . $dir . '/ext_emconf.php';
+        if (!is_file($manifest)) {
+            continue;
+        }
+        $php = lamparo_read_head($manifest, LAMPARO_MAX_MANIFEST_BYTES);
+        $components[] = [
+            'type'    => 'plugin',
+            'slug'    => $dir,
+            'name'    => lamparo_match_in_string($php, '/[\'"]title[\'"]\s*=>\s*[\'"]([^\'"]+)[\'"]/') ?? $dir,
+            'version' => lamparo_match_in_string($php, '/[\'"]version[\'"]\s*=>\s*[\'"]([0-9][^\'"]*)[\'"]/'),
+            'author'  => lamparo_match_in_string($php, '/[\'"]author[\'"]\s*=>\s*[\'"]([^\'"]+)[\'"]/'),
+            'source'  => 'ext_emconf.php',
+        ];
+        if (count($components) >= LAMPARO_MAX_COMPONENTS) {
+            $errors[] = ['scope' => 'components', 'reason' => 'truncated'];
+            break;
+        }
+    }
+
+    return $components;
 }
 
 function lamparo_detect_joomla(array $root, array &$errors): ?array
