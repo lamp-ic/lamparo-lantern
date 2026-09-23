@@ -52,7 +52,25 @@ sur l'environnement :
 ```
 
 Sans clé, la lanterne se tait : une préproduction ne parle jamais. La clé de chaque site se trouve dans votre espace
-lamparo, à la pose ; elle ne s'affiche que tant qu'elle attend sa première réponse.
+lamparo, sur la page de la lanterne.
+
+### Plusieurs comptes sur le même site
+
+Un client qui suit son propre parc et l'agence qui l'entretient ont chacun leur clé pour le même site. Elles se posent
+toutes sur le même serveur, séparées par des virgules dans `LAMPARO_KEY` :
+
+```
+SetEnv LAMPARO_KEY "k_xxxxxxxx:secret,k_yyyyyyyy:secret"
+```
+
+ou une par chaîne dans le fichier :
+
+```php
+<?php return ['k_xxxxxxxx:secret', 'k_yyyyyyyy:secret'];
+```
+
+Les clés de l'environnement et du fichier s'additionnent, dix au plus. Chaque requête annonce la clé qu'elle porte ;
+la lanterne répond avec celle-là, ou pas du tout.
 
 ## Versions
 

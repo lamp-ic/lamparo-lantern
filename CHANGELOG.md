@@ -1,5 +1,11 @@
 # Journal des versions
 
+## 0.4.0 — 2026-09-23
+
+- Plusieurs clés sur un même site : séparées par des virgules dans `LAMPARO_KEY`, ou un tableau de chaînes dans
+  `lamparo-key.php` ; environnement et fichier s'additionnent, dix clés au plus. Chaque requête annonce sa clé
+  (`X-Lamparo-Key-Id`) et n'obtient de réponse qu'avec celle-là. Une seule clé se pose exactement comme avant.
+
 ## 0.3.0 — 2026-09-23
 
 Première publication sur packagist, sous `lamparo/lantern`.
