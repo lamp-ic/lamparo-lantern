@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.6.1
+ * @version 0.7.0
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.6.1');
+define('LAMPARO_PROBE_VERSION', '0.7.0');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -681,12 +681,57 @@ function lamparo_detect_prestashop(array $root, array &$errors): ?array
                     'version'   => $version,
                     'detection' => basename($candidate),
                 ],
-                'components' => [],
+                'components' => lamparo_scan_prestashop_modules($root['web'], $errors),
             ];
         }
     }
 
     return null;
+}
+
+/**
+ * Les modules PrestaShop installés : PrestaShop écrit un config.xml dans le dossier d'un module au moment de
+ * l'installer — nom, nom affiché, version, auteur — et rien pour un module seulement déposé. On lit ce fichier,
+ * jamais le PHP du module.
+ */
+function lamparo_scan_prestashop_modules(string $web, array &$errors): array
+{
+    $components = [];
+    foreach (lamparo_list_dirs($web . '/modules') as $dir) {
+        $manifest = $web . '/modules/' . $dir . '/config.xml';
+        if (!is_file($manifest)) {
+            continue;
+        }
+        $xml = lamparo_read_head($manifest, LAMPARO_MAX_MANIFEST_BYTES);
+        if (stripos($xml, '<module') === false) {
+            continue;
+        }
+        $components[] = [
+            'type'    => 'module',
+            'slug'    => $dir,
+            'name'    => lamparo_xml_text($xml, 'displayName') ?? lamparo_xml_text($xml, 'name') ?? $dir,
+            'version' => lamparo_xml_text($xml, 'version'),
+            'author'  => lamparo_xml_text($xml, 'author'),
+            'source'  => 'config.xml',
+        ];
+        if (count($components) >= LAMPARO_MAX_COMPONENTS) {
+            $errors[] = ['scope' => 'components', 'reason' => 'truncated'];
+            break;
+        }
+    }
+
+    return $components;
+}
+
+/** Le texte d'une balise XML simple, nu ou en CDATA, entités décodées ; null si la balise manque ou est vide. */
+function lamparo_xml_text(string $xml, string $tag): ?string
+{
+    if (preg_match('~<' . preg_quote($tag, '~') . '\b[^>]*>\s*(?:<!\[CDATA\[)?\s*(.*?)\s*(?:\]\]>)?\s*</' . preg_quote($tag, '~') . '>~is', $xml, $m) !== 1) {
+        return null;
+    }
+    $text = trim(html_entity_decode($m[1], ENT_QUOTES | ENT_XML1, 'UTF-8'));
+
+    return $text === '' ? null : $text;
 }
 
 function lamparo_detect_joomla(array $root, array &$errors): ?array
