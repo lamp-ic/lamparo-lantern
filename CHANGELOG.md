@@ -1,5 +1,13 @@
 # Journal des versions
 
+## 0.5.0 — 2026-09-23
+
+- Joomla : les extensions se lisent par leurs manifestes XML — composants, modules, plugins, templates — avec le nom,
+  la version, l'auteur et le serveur de mise à jour que l'éditeur déclare. Les extensions livrées avec Joomla (auteur
+  « Joomla! Project ») sont le cœur et n'ont pas leur ligne. Un manifeste se lit jusqu'à soixante-quatre kilo-octets,
+  le serveur de mise à jour étant souvent en fin de fichier. Rien n'est appelé depuis la lanterne : lamparo interroge
+  ces serveurs de son côté.
+
 ## 0.4.0 — 2026-09-23
 
 - Une variable ou un fichier par compte lamparo qui surveille le site, nommés d'après la clé : `LAMPARO_KEY_09887C4F`,
