@@ -1,5 +1,11 @@
 # Journal des versions
 
+## 0.8.0 — 2026-09-23
+
+- TYPO3 : reconnu par `Typo3Version.php`, en mode composer (`vendor/typo3/cms-core`, à la racine du projet) comme en
+  mode classique (`typo3/sysext/core`). Les extensions d'un TYPO3 classique se lisent dans `typo3conf/ext/*/ext_emconf.php`,
+  comme du texte ; en mode composer elles sont des paquets, déjà remontés.
+
 ## 0.7.1 — 2026-09-23
 
 - PrestaShop 8 et 9 : la version se lit dans `src/Core/Version.php`, là où elle vit ; `AppKernel` ne fait qu'y renvoyer et
