@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.6.0
+ * @version 0.6.1
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.6.0');
+define('LAMPARO_PROBE_VERSION', '0.6.1');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -742,6 +742,10 @@ function lamparo_scan_joomla_extensions(string $joomla, array &$errors): array
         }
         $packagename = lamparo_match_in_string($xml, '~<packagename>\s*([^<]+?)\s*</packagename>~i');
         $slug = $packagename !== null ? 'pkg_' . strtolower($packagename) : strtolower(basename($manifest, '.xml'));
+        // Un paquet du cœur — un pack de langue, par exemple — se met à jour avec Joomla : pas de ligne.
+        if (lamparo_joomla_is_core($xml, $slug)) {
+            continue;
+        }
         $members = [];
         if (preg_match_all('~<file\b([^>]*)>~i', $xml, $files) > 0) {
             foreach ($files[1] as $attributes) {
@@ -785,12 +789,7 @@ function lamparo_scan_joomla_extensions(string $joomla, array &$errors): array
             return;
         }
         $author = lamparo_match_in_string($xml, '~<author>\s*([^<]+?)\s*</author>~i');
-        // Livrée avec Joomla : l'auteur, l'adresse ou le copyright le disent. Deux éditeurs embarqués (TinyMCE,
-        // CodeMirror) signent de leur nom mais se mettent à jour avec le cœur : on les écarte de même.
-        if (($author !== null && preg_match('~joomla!?\s*project~i', $author) === 1)
-            || preg_match('~<authorUrl>\s*(https?://)?(www\.)?joomla\.org~i', $xml) === 1
-            || preg_match('~<copyright>[^<]*Open Source Matters~i', $xml) === 1
-            || in_array($slug, ['plg_editors_tinymce', 'plg_editors_codemirror'], true)) {
+        if (lamparo_joomla_is_core($xml, $slug)) {
             return;
         }
         $name = lamparo_match_in_string($xml, '~<name>\s*([^<]+?)\s*</name>~i');
@@ -848,6 +847,18 @@ function lamparo_scan_joomla_extensions(string $joomla, array &$errors): array
     }
 
     return $components;
+}
+
+/**
+ * Livré avec Joomla : l'auteur, l'adresse ou le copyright du manifeste le disent. Deux éditeurs embarqués (TinyMCE,
+ * CodeMirror) signent de leur nom mais se mettent à jour avec le cœur : on les écarte de même.
+ */
+function lamparo_joomla_is_core(string $xml, string $slug): bool
+{
+    return preg_match('~<author>\s*joomla!?\s*project~i', $xml) === 1
+        || preg_match('~<authorUrl>\s*(https?://)?(www\.)?joomla\.org~i', $xml) === 1
+        || preg_match('~<copyright>[^<]*Open Source Matters~i', $xml) === 1
+        || in_array($slug, ['plg_editors_tinymce', 'plg_editors_codemirror'], true);
 }
 
 /** L'adresse du premier serveur de mise à jour d'un manifeste : nue, en CDATA, ou avec des entités — les trois se voient. */
