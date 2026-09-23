@@ -34,21 +34,22 @@ Téléchargez `lamparo.php` depuis votre espace lamparo, ou depuis ce dépôt, e
 ## La clé
 
 La clé ne va jamais dans le fichier ni dans git. Elle se définit **sur le serveur de production**, dans une variable
-d'environnement `LAMPARO_KEY` — c'est la voie recommandée, celle que lamparo affiche en premier :
+d'environnement nommée d'après la clé — `LAMPARO_KEY_09887C4F` pour la clé `k_09887c4f` — c'est la voie recommandée,
+celle que lamparo affiche en premier :
 
 | Où | Comment |
 |---|---|
 | Plesk, cPanel, o2switch | le panneau, rubrique variables d'environnement PHP du domaine |
-| Apache (`.htaccess` ou vhost) | `SetEnv LAMPARO_KEY "k_xxxxxxxx:secret"` |
-| nginx + PHP-FPM | `fastcgi_param LAMPARO_KEY "k_xxxxxxxx:secret";` dans le bloc `server` |
-| PHP-FPM (pool) | `env[LAMPARO_KEY] = "k_xxxxxxxx:secret"` |
+| Apache (`.htaccess` ou vhost) | `SetEnv LAMPARO_KEY_09887C4F "k_09887c4f:secret"` |
+| nginx + PHP-FPM | `fastcgi_param LAMPARO_KEY_09887C4F "k_09887c4f:secret";` dans le bloc `server` |
+| PHP-FPM (pool) | `env[LAMPARO_KEY_09887C4F] = "k_09887c4f:secret"` |
 
-À défaut, un fichier `lamparo-key.php` posé à côté, **exclu de git** — moins sûr, parce qu'un fichier peut finir dans
-un dépôt ou être servi en clair par un serveur mal configuré ; à réserver aux hébergements où l'on n'a pas la main
-sur l'environnement :
+À défaut, un fichier nommé de même, `lamparo-key-09887c4f.php`, posé à côté, **exclu de git** (`lamparo-key*.php`) —
+moins sûr, parce qu'un fichier peut finir dans un dépôt ou être servi en clair par un serveur mal configuré ; à
+réserver aux hébergements où l'on n'a pas la main sur l'environnement :
 
 ```php
-<?php return 'k_xxxxxxxx:secret';
+<?php return 'k_09887c4f:secret';
 ```
 
 Sans clé, la lanterne se tait : une préproduction ne parle jamais. La clé de chaque site se trouve dans votre espace
@@ -56,21 +57,11 @@ lamparo, sur la page de la lanterne.
 
 ### Plusieurs comptes sur le même site
 
-Un client qui suit son propre parc et l'agence qui l'entretient ont chacun leur clé pour le même site. Elles se posent
-toutes sur le même serveur, séparées par des virgules dans `LAMPARO_KEY` :
-
-```
-SetEnv LAMPARO_KEY "k_xxxxxxxx:secret,k_yyyyyyyy:secret"
-```
-
-ou une par chaîne dans le fichier :
-
-```php
-<?php return ['k_xxxxxxxx:secret', 'k_yyyyyyyy:secret'];
-```
-
-Les clés de l'environnement et du fichier s'additionnent, dix au plus. Chaque requête annonce la clé qu'elle porte ;
-la lanterne répond avec celle-là, ou pas du tout.
+Un client qui suit son propre parc et l'agence qui l'entretient ont chacun leur clé pour le même site. Comme la
+variable et le fichier portent le nom de la clé, chacun pose les siens à côté de ceux de l'autre, sans rien écraser.
+La lanterne lit toutes les variables `LAMPARO_KEY_*` et tous les fichiers `lamparo-key*.php`, dix clés au plus ;
+`LAMPARO_KEY` et `lamparo-key.php`, sans suffixe, restent lus. Chaque requête annonce la clé qu'elle porte ; la
+lanterne répond avec celle-là, ou pas du tout.
 
 ## Versions
 
