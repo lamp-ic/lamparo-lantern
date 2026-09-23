@@ -1,0 +1,721 @@
+<?php
+/**
+ * lamparo — la lanterne
+ * ---------------------------------------------------------------------------
+ * Un seul fichier, générique et public, à déposer à la racine web d'un site à surveiller. Identique pour tous
+ * les sites : il se commit dans git sans risque, il se met à jour comme n'importe quelle dépendance.
+ * Aucune dépendance, aucun framework, PHP 7.4 ou plus (mutualisé compris).
+ *
+ * LA CLÉ N'EST PAS DANS CE FICHIER. Elle vient de l'environnement de production, variable LAMPARO_KEY
+ * (« identifiant:secret »), définie dans le panneau d'hébergement, un SetEnv Apache, un fastcgi_param nginx ou
+ * l'env[] de PHP-FPM ; à défaut, du fichier lamparo-key.php posé à côté (exclu de git) :
+ *     <?php return 'k_xxxxxxxx:secret';
+ * Ce fichier de clé est lu comme du texte, jamais exécuté ; demandé depuis le web, il ne renvoie rien.
+ * Sans clé, la lanterne répond 404 : une préproduction ou une copie ne parle jamais.
+ *
+ * PRINCIPES NON NÉGOCIABLES (CLAUDE.md §2) :
+ *   1. LECTURE SEULE ABSOLUE — n'écrit jamais, ne modifie jamais rien.
+ *   2. AUCUNE EXÉCUTION DYNAMIQUE — pas d'eval, pas d'include, pas d'exec, aucun paramètre de requête
+ *      interprété comme un chemin.
+ *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
+ *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
+ *
+ * @version 0.3.0
+ * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
+ */
+
+declare(strict_types=1);
+
+define('LAMPARO_PROBE_VERSION', '0.3.0');
+
+/** Tolérance d'horloge, en secondes. */
+define('LAMPARO_MAX_SKEW', 300);
+
+/**
+ * Plafonds de collecte. Ils bornent ce qu'on RENVOIE, ce qui est peu de chose : mesuré sur un composer.lock de
+ * 161 paquets, lire et décoder le fichier coûte 2 Mo, soit environ 12 Ko par paquet. Deux mille paquets tiennent
+ * donc dans quelques dizaines de méga-octets, loin de la limite d'un hébergement mutualisé.
+ *
+ * La vraie dépense est ailleurs : le fichier est lu puis décodé ENTIÈREMENT avant que ces plafonds ne s'appliquent.
+ * C'est donc la taille du fichier qu'il faut borner, et c'est ce que fait LAMPARO_MAX_LOCK_BYTES.
+ */
+define('LAMPARO_MAX_PACKAGES', 2000);
+define('LAMPARO_MAX_COMPONENTS', 500);
+define('LAMPARO_MAX_HEADER_BYTES', 8192);
+
+/**
+ * Au-delà, on ne lit pas le composer.lock du tout. Six méga-octets de JSON pèsent environ quatre fois cela une fois
+ * décodés : on reste sous les trente méga-octets, ce qu'un hébergement mutualisé accorde sans broncher. La lanterne
+ * tourne chez le client : elle n'a pas le droit de faire tomber son site pour se renseigner.
+ */
+define('LAMPARO_MAX_LOCK_BYTES', 6291456);
+
+// La lanterne n'a aucun usage en CLI ; les tests la chargent avec LAMPARO_TESTING défini, sans la lancer.
+if (PHP_SAPI === 'cli') {
+    if (!defined('LAMPARO_TESTING')) {
+        exit(0);
+    }
+} else {
+    // Aucun avertissement PHP ne doit sortir sur le web : un chemin dans un message d'erreur serait une fuite.
+    @ini_set('display_errors', '0');
+    error_reporting(0);
+    lamparo_main();
+}
+
+// ---------------------------------------------------------------------------
+// Entrée
+// ---------------------------------------------------------------------------
+
+function lamparo_main(): void
+{
+    $key = lamparo_load_key();
+    if ($key === null || !lamparo_request_is_authentic($key)) {
+        lamparo_not_found();
+    }
+
+    $errors  = [];
+    $root    = lamparo_detect_root();
+    $facts   = lamparo_collect($root, $errors);
+
+    lamparo_respond([
+        'probe_version' => LAMPARO_PROBE_VERSION,
+        'key_id'        => $key['id'],
+        'collected_at'  => gmdate('c'),
+        'facts'         => $facts,
+        'errors'        => $errors,
+    ], $key['secret']);
+}
+
+// ---------------------------------------------------------------------------
+// La clé : environnement d'abord, fichier à côté à défaut. Jamais dans ce fichier.
+// ---------------------------------------------------------------------------
+
+/**
+ * @return array{id: string, secret: string}|null
+ */
+function lamparo_load_key(): ?array
+{
+    $raw = null;
+    foreach (['LAMPARO_KEY', 'REDIRECT_LAMPARO_KEY'] as $name) {
+        $value = getenv($name);
+        if (!is_string($value) || $value === '') {
+            $value = isset($_SERVER[$name]) ? $_SERVER[$name] : (isset($_ENV[$name]) ? $_ENV[$name] : null);
+        }
+        if (is_string($value) && trim($value) !== '') {
+            $raw = $value;
+            break;
+        }
+    }
+    if ($raw === null) {
+        $raw = lamparo_read_key_file(__DIR__ . '/lamparo-key.php');
+    }
+
+    return $raw === null ? null : lamparo_parse_key($raw);
+}
+
+/** Le fichier de clé est lu comme du texte : on y cherche « identifiant:secret » entre guillemets, sans l'exécuter. */
+function lamparo_read_key_file(string $path): ?string
+{
+    if (!is_file($path) || !is_readable($path)) {
+        return null;
+    }
+    $head = lamparo_read_head($path);
+    if (preg_match('/[\'"]([A-Za-z0-9_]+:[A-Za-z0-9]+)[\'"]/', $head, $matches) === 1) {
+        return $matches[1];
+    }
+
+    return null;
+}
+
+/**
+ * @return array{id: string, secret: string}|null
+ */
+function lamparo_parse_key(string $raw): ?array
+{
+    if (preg_match('/^\s*([A-Za-z0-9_]{4,32}):([A-Za-z0-9]{32,128})\s*$/', $raw, $matches) !== 1) {
+        return null;
+    }
+
+    return ['id' => $matches[1], 'secret' => $matches[2]];
+}
+
+/**
+ * Réponse indistinguable d'un fichier inexistant.
+ * Aucun message différencié : on ne confirme jamais l'existence de la sonde.
+ */
+function lamparo_not_found(): void
+{
+    header('HTTP/1.1 404 Not Found');
+    header('Content-Type: text/html; charset=utf-8');
+    exit;
+}
+
+/** La réponse est signée avec le même secret : la plateforme sait que c'est bien la lanterne qui parle. */
+function lamparo_respond(array $payload, string $secret): void
+{
+    $body = (string) json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    header('X-Robots-Tag: noindex, nofollow');
+    header('X-Lamparo-Signature: ' . hash_hmac('sha256', $body, $secret));
+    echo $body;
+    exit;
+}
+
+// ---------------------------------------------------------------------------
+// Authentification HMAC
+// ---------------------------------------------------------------------------
+
+/**
+ * Chaîne canonique signée (séparateur \n) :
+ *   GET \n {path} \n {key_id} \n {timestamp} \n {nonce}
+ */
+/** @param array{id: string, secret: string} $key */
+function lamparo_request_is_authentic(array $key): bool
+{
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET') {
+        return false;
+    }
+
+    $keyId     = lamparo_header('X-Lamparo-Key-Id');
+    $timestamp = lamparo_header('X-Lamparo-Timestamp');
+    $nonce     = lamparo_header('X-Lamparo-Nonce');
+    $signature = lamparo_header('X-Lamparo-Signature');
+
+    if ($keyId === null || $timestamp === null || $nonce === null || $signature === null) {
+        return false;
+    }
+
+    if (!hash_equals($key['id'], $keyId)) {
+        return false;
+    }
+
+    if (!ctype_digit($timestamp)) {
+        return false;
+    }
+
+    // Fenêtre temporelle : ±LAMPARO_MAX_SKEW secondes.
+    if (abs(time() - (int) $timestamp) > LAMPARO_MAX_SKEW) {
+        return false;
+    }
+
+    // Nonce : format contrôlé, non stocké (cf. ARCHITECTURE.md §3.1).
+    if (!preg_match('/^[A-Za-z0-9]{8,64}$/', $nonce)) {
+        return false;
+    }
+
+    $path = lamparo_request_path();
+
+    $canonical = implode("\n", [
+        'GET',
+        $path,
+        $keyId,
+        $timestamp,
+        $nonce,
+    ]);
+
+    $expected = hash_hmac('sha256', $canonical, $key['secret']);
+
+    return hash_equals($expected, strtolower($signature));
+}
+
+function lamparo_header(string $name): ?string
+{
+    $key = 'HTTP_' . str_replace('-', '_', strtoupper($name));
+    if (!isset($_SERVER[$key])) {
+        return null;
+    }
+    $value = trim((string) $_SERVER[$key]);
+
+    return $value === '' ? null : $value;
+}
+
+/** Chemin de la requête, sans query string. */
+function lamparo_request_path(): string
+{
+    $uri = (string) ($_SERVER['REQUEST_URI'] ?? '');
+    $pos = strpos($uri, '?');
+
+    return $pos === false ? $uri : substr($uri, 0, $pos);
+}
+
+// ---------------------------------------------------------------------------
+// Détection de la racine applicative
+// ---------------------------------------------------------------------------
+
+/**
+ * La sonde est normalement à la racine web, mais celle-ci peut être un
+ * sous-dossier (web/, public/, httpdocs/). On remonte au maximum 4 niveaux
+ * en cherchant des marqueurs connus. Aucun chemin ne vient d'une entrée
+ * utilisateur : on part toujours de __DIR__.
+ */
+function lamparo_detect_root(): array
+{
+    $webRoot = __DIR__;
+    $appRoot = $webRoot;
+
+    $current = $webRoot;
+    for ($i = 0; $i < 4; $i++) {
+        if (is_file($current . '/composer.json') || is_file($current . '/composer.lock')) {
+            $appRoot = $current;
+            break;
+        }
+        $parent = dirname($current);
+        if ($parent === $current) {
+            break;
+        }
+        $current = $parent;
+    }
+
+    return ['web' => $webRoot, 'app' => $appRoot];
+}
+
+// ---------------------------------------------------------------------------
+// Collecte (LISTE BLANCHE — ne rien ajouter sans mettre à jour ARCHITECTURE.md)
+// ---------------------------------------------------------------------------
+
+function lamparo_collect(array $root, array &$errors): array
+{
+    $facts = [
+        'php'        => lamparo_facts_php(),
+        'server'     => lamparo_facts_server($root),
+        'cms'        => ['type' => 'unknown', 'version' => null, 'detection' => null],
+        'packages'   => [],
+        'components' => [],
+    ];
+
+    // Paquets composer : utile même sans CMS (site sur mesure).
+    $facts['packages'] = lamparo_read_composer_lock($root['app'], $errors);
+
+    // Détection CMS, dans l'ordre des marqueurs les plus fiables.
+    $detectors = [
+        'lamparo_detect_wordpress',
+        'lamparo_detect_drupal',
+        'lamparo_detect_prestashop',
+        'lamparo_detect_joomla',
+    ];
+
+    foreach ($detectors as $detector) {
+        $result = $detector($root, $errors);
+        if ($result !== null) {
+            $facts['cms']        = $result['cms'];
+            $facts['components'] = $result['components'];
+            break;
+        }
+    }
+
+    return $facts;
+}
+
+function lamparo_facts_php(): array
+{
+    $extensions = get_loaded_extensions();
+    sort($extensions);
+
+    return [
+        'version'      => PHP_VERSION,
+        'sapi'         => PHP_SAPI,
+        'extensions'   => $extensions,
+        'memory_limit' => (string) ini_get('memory_limit'),
+        'opcache'      => function_exists('opcache_get_status'),
+    ];
+}
+
+function lamparo_facts_server(array $root): array
+{
+    $documentRoot = isset($_SERVER['DOCUMENT_ROOT'])
+        ? rtrim((string) $_SERVER['DOCUMENT_ROOT'], '/')
+        : null;
+
+    return [
+        'software'             => (string) ($_SERVER['SERVER_SOFTWARE'] ?? 'unknown'),
+        'os'                   => PHP_OS_FAMILY,
+        'document_root_match'  => $documentRoot !== null && $documentRoot === rtrim($root['web'], '/'),
+    ];
+}
+
+// ---------------------------------------------------------------------------
+// composer.lock
+// ---------------------------------------------------------------------------
+
+function lamparo_read_composer_lock(string $appRoot, array &$errors): array
+{
+    $path = $appRoot . '/composer.lock';
+    if (!is_file($path) || !is_readable($path)) {
+        return [];
+    }
+
+    // La taille AVANT la lecture : c'est le seul moment où l'on peut encore refuser sans avoir rien dépensé.
+    $size = @filesize($path);
+    if ($size === false || $size > LAMPARO_MAX_LOCK_BYTES) {
+        $errors[] = ['scope' => 'packages', 'reason' => 'composer.lock too large'];
+
+        return [];
+    }
+
+    $raw = @file_get_contents($path);
+    if ($raw === false) {
+        $errors[] = ['scope' => 'packages', 'reason' => 'composer.lock unreadable'];
+
+        return [];
+    }
+
+    $data = json_decode($raw, true);
+    if (!is_array($data) || !isset($data['packages']) || !is_array($data['packages'])) {
+        $errors[] = ['scope' => 'packages', 'reason' => 'composer.lock unparsable'];
+
+        return [];
+    }
+
+    $packages = [];
+    foreach ($data['packages'] as $package) {
+        if (!isset($package['name'], $package['version'])) {
+            continue;
+        }
+        $packages[] = [
+            'name'    => (string) $package['name'],
+            'version' => ltrim((string) $package['version'], 'v'),
+            'source'  => 'composer.lock',
+        ];
+        if (count($packages) >= LAMPARO_MAX_PACKAGES) {
+            $errors[] = ['scope' => 'packages', 'reason' => 'truncated at ' . LAMPARO_MAX_PACKAGES];
+            break;
+        }
+    }
+
+    return $packages;
+}
+
+// ---------------------------------------------------------------------------
+// WordPress
+// ---------------------------------------------------------------------------
+
+function lamparo_detect_wordpress(array $root, array &$errors): ?array
+{
+    $versionFile = null;
+    foreach ([$root['web'], $root['app']] as $base) {
+        $candidate = $base . '/wp-includes/version.php';
+        if (is_file($candidate)) {
+            $versionFile = $candidate;
+            $wpRoot      = $base;
+            break;
+        }
+    }
+
+    if ($versionFile === null) {
+        return null;
+    }
+
+    $version = lamparo_match_in_file($versionFile, '/\$wp_version\s*=\s*[\'"]([^\'"]+)[\'"]/');
+
+    $components = array_merge(
+        lamparo_scan_wp_plugins($wpRoot . '/wp-content/plugins', $errors),
+        lamparo_scan_wp_themes($wpRoot . '/wp-content/themes', $errors)
+    );
+
+    return [
+        'cms' => [
+            'type'      => 'wordpress',
+            'version'   => $version,
+            'detection' => 'wp-includes/version.php',
+        ],
+        'components' => $components,
+    ];
+}
+
+function lamparo_scan_wp_plugins(string $dir, array &$errors): array
+{
+    if (!is_dir($dir) || !is_readable($dir)) {
+        return [];
+    }
+
+    $components = [];
+    foreach (lamparo_list_dirs($dir) as $slug) {
+        $pluginDir = $dir . '/' . $slug;
+        $mainFile  = lamparo_find_wp_plugin_file($pluginDir);
+        if ($mainFile === null) {
+            continue;
+        }
+
+        $header = lamparo_read_head($mainFile);
+        $name   = lamparo_match_in_string($header, '/^[ \t\/*#@]*Plugin Name:\s*(.+)$/mi');
+        if ($name === null) {
+            continue;
+        }
+
+        $components[] = [
+            'type'    => 'plugin',
+            'slug'    => $slug,
+            'name'    => trim($name),
+            'version' => lamparo_match_in_string($header, '/^[ \t\/*#@]*Version:\s*(.+)$/mi'),
+            'source'  => 'plugin-header',
+        ];
+
+        if (count($components) >= LAMPARO_MAX_COMPONENTS) {
+            $errors[] = ['scope' => 'components', 'reason' => 'truncated'];
+            break;
+        }
+    }
+
+    return $components;
+}
+
+function lamparo_find_wp_plugin_file(string $pluginDir): ?string
+{
+    $files = @scandir($pluginDir);
+    if ($files === false) {
+        return null;
+    }
+
+    foreach ($files as $file) {
+        if (substr($file, -4) !== '.php') {
+            continue;
+        }
+        $path = $pluginDir . '/' . $file;
+        if (!is_file($path)) {
+            continue;
+        }
+        if (stripos(lamparo_read_head($path), 'Plugin Name:') !== false) {
+            return $path;
+        }
+    }
+
+    return null;
+}
+
+function lamparo_scan_wp_themes(string $dir, array &$errors): array
+{
+    if (!is_dir($dir) || !is_readable($dir)) {
+        return [];
+    }
+
+    $components = [];
+    foreach (lamparo_list_dirs($dir) as $slug) {
+        $styleFile = $dir . '/' . $slug . '/style.css';
+        if (!is_file($styleFile)) {
+            continue;
+        }
+        $header = lamparo_read_head($styleFile);
+        $name   = lamparo_match_in_string($header, '/^[ \t\/*#@]*Theme Name:\s*(.+)$/mi');
+        if ($name === null) {
+            continue;
+        }
+        $components[] = [
+            'type'    => 'theme',
+            'slug'    => $slug,
+            'name'    => trim($name),
+            'version' => lamparo_match_in_string($header, '/^[ \t\/*#@]*Version:\s*(.+)$/mi'),
+            'source'  => 'theme-header',
+        ];
+    }
+
+    return $components;
+}
+
+// ---------------------------------------------------------------------------
+// Drupal
+// ---------------------------------------------------------------------------
+
+function lamparo_detect_drupal(array $root, array &$errors): ?array
+{
+    $candidates = [
+        $root['web'] . '/core/lib/Drupal.php',
+        $root['app'] . '/web/core/lib/Drupal.php',
+        $root['app'] . '/docroot/core/lib/Drupal.php',
+        $root['app'] . '/core/lib/Drupal.php',
+    ];
+
+    $found = null;
+    foreach ($candidates as $candidate) {
+        if (is_file($candidate)) {
+            $found = $candidate;
+            break;
+        }
+    }
+
+    if ($found === null) {
+        return null;
+    }
+
+    $version     = lamparo_match_in_file($found, '/const\s+VERSION\s*=\s*[\'"]([^\'"]+)[\'"]/');
+    $drupalRoot  = dirname($found, 3); // .../core/lib/Drupal.php → racine Drupal
+    $components  = [];
+
+    // Le dossier dit l'origine : Drupal range le contribué et le sur-mesure à part. On remonte le fait, pas un avis.
+    $folders = [
+        ['/modules/contrib', 'module', 'contrib'],
+        ['/modules/custom',  'module', 'custom'],
+        ['/themes/contrib',  'theme',  'contrib'],
+        ['/themes/custom',   'theme',  'custom'],
+    ];
+    foreach ($folders as $folder) {
+        $components = array_merge(
+            $components,
+            lamparo_scan_drupal_infos($drupalRoot . $folder[0], $folder[1], $folder[2], $errors)
+        );
+    }
+
+    return [
+        'cms' => [
+            'type'      => 'drupal',
+            'version'   => $version,
+            'detection' => 'core/lib/Drupal.php',
+        ],
+        'components' => $components,
+    ];
+}
+
+function lamparo_scan_drupal_infos(string $dir, string $type, string $origin, array &$errors): array
+{
+    if (!is_dir($dir) || !is_readable($dir)) {
+        return [];
+    }
+
+    $components = [];
+    foreach (lamparo_list_dirs($dir) as $slug) {
+        $infoFile = $dir . '/' . $slug . '/' . $slug . '.info.yml';
+        if (!is_file($infoFile)) {
+            continue;
+        }
+        $head = lamparo_read_head($infoFile);
+        $components[] = [
+            'type'    => $type,
+            'slug'    => $slug,
+            'name'    => lamparo_match_in_string($head, '/^name:\s*[\'"]?([^\'"\n]+)/mi'),
+            'version' => lamparo_match_in_string($head, '/^version:\s*[\'"]?([^\'"\n]+)/mi'),
+            'origin'  => $origin,
+            // Le script d'empaquetage de drupal.org ajoute « project: » en fin de fichier. Son absence est un fait :
+            // ce composant n'est pas venu du dépôt public, quel que soit le dossier où il se trouve.
+            'project' => lamparo_match_in_string($head, '/^project:\s*[\'"]?([^\'"\n]+)/mi'),
+            'source'  => 'info.yml',
+        ];
+        if (count($components) >= LAMPARO_MAX_COMPONENTS) {
+            $errors[] = ['scope' => 'components', 'reason' => 'truncated'];
+            break;
+        }
+    }
+
+    return $components;
+}
+
+// ---------------------------------------------------------------------------
+// PrestaShop / Joomla (best effort)
+// ---------------------------------------------------------------------------
+
+function lamparo_detect_prestashop(array $root, array &$errors): ?array
+{
+    $candidates = [
+        $root['web'] . '/app/AppKernel.php',
+        $root['web'] . '/config/settings.inc.php',
+        $root['web'] . '/config/defines.inc.php',
+    ];
+
+    foreach ($candidates as $candidate) {
+        if (!is_file($candidate)) {
+            continue;
+        }
+        $version = lamparo_match_in_file($candidate, '/_PS_VERSION_[\'"]?\s*,\s*[\'"]([0-9.]+)/')
+            ?? lamparo_match_in_file($candidate, '/const\s+VERSION\s*=\s*[\'"]([0-9.]+)/');
+
+        if ($version !== null) {
+            return [
+                'cms' => [
+                    'type'      => 'prestashop',
+                    'version'   => $version,
+                    'detection' => basename($candidate),
+                ],
+                'components' => [],
+            ];
+        }
+    }
+
+    return null;
+}
+
+function lamparo_detect_joomla(array $root, array &$errors): ?array
+{
+    $candidates = [
+        $root['web'] . '/libraries/src/Version.php',
+        $root['web'] . '/libraries/cms/version/version.php',
+    ];
+
+    foreach ($candidates as $candidate) {
+        if (!is_file($candidate)) {
+            continue;
+        }
+        $major = lamparo_match_in_file($candidate, '/MAJOR_VERSION\s*=\s*(\d+)/');
+        $minor = lamparo_match_in_file($candidate, '/MINOR_VERSION\s*=\s*(\d+)/');
+        $patch = lamparo_match_in_file($candidate, '/PATCH_VERSION\s*=\s*(\d+)/');
+
+        if ($major !== null) {
+            return [
+                'cms' => [
+                    'type'      => 'joomla',
+                    'version'   => implode('.', array_filter([$major, $minor, $patch], 'strlen')),
+                    'detection' => 'libraries/src/Version.php',
+                ],
+                'components' => [],
+            ];
+        }
+    }
+
+    return null;
+}
+
+// ---------------------------------------------------------------------------
+// Utilitaires de lecture (aucune écriture, aucune exécution)
+// ---------------------------------------------------------------------------
+
+/** Liste les sous-répertoires immédiats, sans les points. */
+function lamparo_list_dirs(string $dir): array
+{
+    $entries = @scandir($dir);
+    if ($entries === false) {
+        return [];
+    }
+
+    $dirs = [];
+    foreach ($entries as $entry) {
+        if ($entry === '.' || $entry === '..') {
+            continue;
+        }
+        if (is_dir($dir . '/' . $entry)) {
+            $dirs[] = $entry;
+        }
+    }
+
+    return $dirs;
+}
+
+/** Lit uniquement l'en-tête d'un fichier (métadonnées), jamais son contenu entier. */
+function lamparo_read_head(string $path): string
+{
+    if (!is_file($path) || !is_readable($path)) {
+        return '';
+    }
+    $handle = @fopen($path, 'rb');
+    if ($handle === false) {
+        return '';
+    }
+    $head = (string) fread($handle, LAMPARO_MAX_HEADER_BYTES);
+    fclose($handle);
+
+    return $head;
+}
+
+function lamparo_match_in_file(string $path, string $pattern): ?string
+{
+    return lamparo_match_in_string(lamparo_read_head($path), $pattern);
+}
+
+function lamparo_match_in_string(string $subject, string $pattern): ?string
+{
+    if ($subject === '') {
+        return null;
+    }
+    if (preg_match($pattern, $subject, $matches) === 1) {
+        return trim($matches[1]);
+    }
+
+    return null;
+}
