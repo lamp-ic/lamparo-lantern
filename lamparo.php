@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.5.0
+ * @version 0.6.0
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.5.0');
+define('LAMPARO_PROBE_VERSION', '0.6.0');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -732,7 +732,51 @@ function lamparo_scan_joomla_extensions(string $joomla, array &$errors): array
 {
     $components = [];
     $full = false;
-    $add = static function (string $type, string $slug, string $manifest, string $client) use (&$components, &$full, &$errors): void {
+    // Les paquets d'abord : c'est leur manifeste qui porte le serveur de mise à jour et la liste de ce qu'ils
+    // installent — un composant, des plugins, un module. Chaque membre saura à quel paquet il appartient.
+    $packaged = [];
+    foreach (glob($joomla . '/administrator/manifests/packages/pkg_*.xml') ?: [] as $manifest) {
+        $xml = lamparo_read_head($manifest, LAMPARO_MAX_MANIFEST_BYTES);
+        if (stripos($xml, '<extension') === false) {
+            continue;
+        }
+        $packagename = lamparo_match_in_string($xml, '~<packagename>\s*([^<]+?)\s*</packagename>~i');
+        $slug = $packagename !== null ? 'pkg_' . strtolower($packagename) : strtolower(basename($manifest, '.xml'));
+        $members = [];
+        if (preg_match_all('~<file\b([^>]*)>~i', $xml, $files) > 0) {
+            foreach ($files[1] as $attributes) {
+                $type  = lamparo_match_in_string($attributes, '~\btype="([^"]+)"~i');
+                $id    = lamparo_match_in_string($attributes, '~\bid="([^"]+)"~i');
+                $group = lamparo_match_in_string($attributes, '~\bgroup="([^"]+)"~i');
+                if ($type === null || $id === null) {
+                    continue;
+                }
+                $member = strtolower($id);
+                if ($type === 'plugin' && $group !== null) {
+                    $member = 'plg_' . strtolower($group) . '_' . $member;
+                } elseif ($type === 'module' && strpos($member, 'mod_') !== 0) {
+                    $member = 'mod_' . $member;
+                } elseif ($type === 'component' && strpos($member, 'com_') !== 0) {
+                    $member = 'com_' . $member;
+                }
+                $members[] = $member;
+                $packaged[$member] = $slug;
+            }
+        }
+        $components[] = [
+            'type'       => 'bundle',
+            'slug'       => $slug,
+            'name'       => lamparo_match_in_string($xml, '~<name>\s*([^<]+?)\s*</name>~i'),
+            'version'    => lamparo_match_in_string($xml, '~<version>\s*([^<]+?)\s*</version>~i'),
+            'author'     => lamparo_match_in_string($xml, '~<author>\s*([^<]+?)\s*</author>~i'),
+            'client'     => 'administrator',
+            'update_url' => lamparo_joomla_update_server($xml),
+            'members'    => $members,
+            'source'     => 'manifest',
+        ];
+    }
+
+    $add = static function (string $type, string $slug, string $manifest, string $client) use (&$components, &$full, &$errors, $packaged): void {
         if ($full) {
             return;
         }
@@ -741,7 +785,12 @@ function lamparo_scan_joomla_extensions(string $joomla, array &$errors): array
             return;
         }
         $author = lamparo_match_in_string($xml, '~<author>\s*([^<]+?)\s*</author>~i');
-        if ($author !== null && preg_match('~joomla!?\s*project~i', $author) === 1) {
+        // Livrée avec Joomla : l'auteur, l'adresse ou le copyright le disent. Deux éditeurs embarqués (TinyMCE,
+        // CodeMirror) signent de leur nom mais se mettent à jour avec le cœur : on les écarte de même.
+        if (($author !== null && preg_match('~joomla!?\s*project~i', $author) === 1)
+            || preg_match('~<authorUrl>\s*(https?://)?(www\.)?joomla\.org~i', $xml) === 1
+            || preg_match('~<copyright>[^<]*Open Source Matters~i', $xml) === 1
+            || in_array($slug, ['plg_editors_tinymce', 'plg_editors_codemirror'], true)) {
             return;
         }
         $name = lamparo_match_in_string($xml, '~<name>\s*([^<]+?)\s*</name>~i');
@@ -756,7 +805,9 @@ function lamparo_scan_joomla_extensions(string $joomla, array &$errors): array
             'author'     => $author,
             'client'     => $client,
             // La première adresse de <updateservers> : là où l'éditeur publie ses versions. Rien n'est appelé d'ici.
-            'update_url' => lamparo_match_in_string($xml, '~<server\b[^>]*>\s*(https?://[^<\s]+)\s*</server>~i'),
+            'update_url' => lamparo_joomla_update_server($xml),
+            // Installée par un paquet : c'est lui qui se met à jour, et son serveur qui répond.
+            'package'    => isset($packaged[$slug]) ? $packaged[$slug] : null,
             'source'     => 'manifest',
         ];
         if (count($components) >= LAMPARO_MAX_COMPONENTS) {
@@ -797,6 +848,16 @@ function lamparo_scan_joomla_extensions(string $joomla, array &$errors): array
     }
 
     return $components;
+}
+
+/** L'adresse du premier serveur de mise à jour d'un manifeste : nue, en CDATA, ou avec des entités — les trois se voient. */
+function lamparo_joomla_update_server(string $xml): ?string
+{
+    if (preg_match('~<server\b[^>]*>\s*(?:<!\[CDATA\[)?\s*(https?://[^\]<\s]+)~i', $xml, $m) !== 1) {
+        return null;
+    }
+
+    return html_entity_decode($m[1], ENT_QUOTES | ENT_XML1, 'UTF-8');
 }
 
 // ---------------------------------------------------------------------------
