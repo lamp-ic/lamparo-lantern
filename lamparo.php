@@ -8,9 +8,13 @@
  *
  * LA CLÉ N'EST PAS DANS CE FICHIER. Elle vient de l'environnement de production, variable LAMPARO_KEY
  * (« identifiant:secret »), définie dans le panneau d'hébergement, un SetEnv Apache, un fastcgi_param nginx ou
- * l'env[] de PHP-FPM ; à défaut, du fichier lamparo-key.php posé à côté (exclu de git) :
+ * l'env[] de PHP-FPM ; et/ou du fichier lamparo-key.php posé à côté (exclu de git) :
  *     <?php return 'k_xxxxxxxx:secret';
  * Ce fichier de clé est lu comme du texte, jamais exécuté ; demandé depuis le web, il ne renvoie rien.
+ * PLUSIEURS CLÉS quand plusieurs comptes lamparo surveillent le même site (un client et son agence, chacun
+ * payant sa ligne) : séparées par des virgules dans LAMPARO_KEY, ou une par chaîne dans le fichier :
+ *     <?php return ['k_xxxxxxxx:secret', 'k_yyyyyyyy:secret'];
+ * Chaque requête dit quelle clé elle porte (X-Lamparo-Key-Id) ; la lanterne répond avec celle-là, ou pas du tout.
  * Sans clé, la lanterne répond 404 : une préproduction ou une copie ne parle jamais.
  *
  * PRINCIPES NON NÉGOCIABLES (CLAUDE.md §2) :
@@ -20,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.3.0
+ * @version 0.4.0
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.3.0');
+define('LAMPARO_PROBE_VERSION', '0.4.0');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -50,6 +54,9 @@ define('LAMPARO_MAX_HEADER_BYTES', 8192);
  */
 define('LAMPARO_MAX_LOCK_BYTES', 6291456);
 
+/** Plus de clés que ça, ce n'est plus un site partagé : c'est une erreur de configuration. */
+define('LAMPARO_MAX_KEYS', 10);
+
 // La lanterne n'a aucun usage en CLI ; les tests la chargent avec LAMPARO_TESTING défini, sans la lancer.
 if (PHP_SAPI === 'cli') {
     if (!defined('LAMPARO_TESTING')) {
@@ -68,7 +75,7 @@ if (PHP_SAPI === 'cli') {
 
 function lamparo_main(): void
 {
-    $key = lamparo_load_key();
+    $key = lamparo_key_for_request(lamparo_load_keys());
     if ($key === null || !lamparo_request_is_authentic($key)) {
         lamparo_not_found();
     }
@@ -87,44 +94,89 @@ function lamparo_main(): void
 }
 
 // ---------------------------------------------------------------------------
-// La clé : environnement d'abord, fichier à côté à défaut. Jamais dans ce fichier.
+// Les clés : l'environnement et le fichier à côté, jamais ce fichier. Une clé par compte lamparo qui surveille
+// le site ; au plus LAMPARO_MAX_KEYS.
 // ---------------------------------------------------------------------------
 
 /**
- * @return array{id: string, secret: string}|null
+ * Toutes les clés en place : celles de l'environnement, puis celles du fichier, sans doublon d'identifiant.
+ *
+ * @return array<int, array{id: string, secret: string}>
  */
-function lamparo_load_key(): ?array
+function lamparo_load_keys(): array
 {
-    $raw = null;
+    $raw = [];
     foreach (['LAMPARO_KEY', 'REDIRECT_LAMPARO_KEY'] as $name) {
         $value = getenv($name);
         if (!is_string($value) || $value === '') {
             $value = isset($_SERVER[$name]) ? $_SERVER[$name] : (isset($_ENV[$name]) ? $_ENV[$name] : null);
         }
         if (is_string($value) && trim($value) !== '') {
-            $raw = $value;
-            break;
+            $raw[] = $value;
         }
     }
-    if ($raw === null) {
-        $raw = lamparo_read_key_file(__DIR__ . '/lamparo-key.php');
+    $file = lamparo_read_key_file(__DIR__ . '/lamparo-key.php');
+    if ($file !== null) {
+        $raw[] = $file;
     }
 
-    return $raw === null ? null : lamparo_parse_key($raw);
+    return lamparo_parse_keys(implode(',', $raw));
 }
 
-/** Le fichier de clé est lu comme du texte : on y cherche « identifiant:secret » entre guillemets, sans l'exécuter. */
+/** La clé que la requête annonce, si elle est en place ; l'identifiant se compare en temps constant, comme le reste. */
+function lamparo_key_for_request(array $keys): ?array
+{
+    $keyId = lamparo_header('X-Lamparo-Key-Id');
+    if ($keyId === null) {
+        return null;
+    }
+    foreach ($keys as $key) {
+        if (hash_equals($key['id'], $keyId)) {
+            return $key;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Le fichier de clé est lu comme du texte : on y prend chaque « identifiant:secret » entre guillemets, sans
+ * l'exécuter. Plusieurs chaînes (un tableau) donnent plusieurs clés, rendues séparées par des virgules.
+ */
 function lamparo_read_key_file(string $path): ?string
 {
     if (!is_file($path) || !is_readable($path)) {
         return null;
     }
     $head = lamparo_read_head($path);
-    if (preg_match('/[\'"]([A-Za-z0-9_]+:[A-Za-z0-9]+)[\'"]/', $head, $matches) === 1) {
-        return $matches[1];
+    if (preg_match_all('/[\'"]([A-Za-z0-9_]+:[A-Za-z0-9]+(?:\s*,\s*[A-Za-z0-9_]+:[A-Za-z0-9]+)*)[\'"]/', $head, $matches) > 0) {
+        return implode(',', $matches[1]);
     }
 
     return null;
+}
+
+/**
+ * Une liste de clés — séparées par des virgules, des points-virgules ou des blancs — sans doublon d'identifiant,
+ * les malformées ignorées, au plus LAMPARO_MAX_KEYS.
+ *
+ * @return array<int, array{id: string, secret: string}>
+ */
+function lamparo_parse_keys(string $raw): array
+{
+    $keys = [];
+    foreach (preg_split('/[,;\s]+/', $raw) ?: [] as $part) {
+        $key = lamparo_parse_key($part);
+        if ($key === null || isset($keys[$key['id']])) {
+            continue;
+        }
+        $keys[$key['id']] = $key;
+        if (count($keys) >= LAMPARO_MAX_KEYS) {
+            break;
+        }
+    }
+
+    return array_values($keys);
 }
 
 /**
