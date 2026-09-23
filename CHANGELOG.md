@@ -1,5 +1,13 @@
 # Journal des versions
 
+## 0.6.0 — 2026-09-23
+
+- Joomla : les paquets (`administrator/manifests/packages/pkg_*.xml`) se lisent, avec leur version, leur serveur de
+  mise à jour — nu, en CDATA ou avec des entités — et la liste de ce qu'ils installent. Chaque composant, module ou
+  plugin installé par un paquet dit lequel (`package`) : c'est le paquet qui se met à jour, et son serveur qui répond.
+- Joomla : une extension livrée avec le cœur se reconnaît aussi à son adresse d'auteur (joomla.org) ou à son copyright
+  (Open Source Matters), et les éditeurs embarqués TinyMCE et CodeMirror, signés de leur propre nom, sont écartés de même.
+
 ## 0.5.0 — 2026-09-23
 
 - Joomla : les extensions se lisent par leurs manifestes XML — composants, modules, plugins, templates — avec le nom,
