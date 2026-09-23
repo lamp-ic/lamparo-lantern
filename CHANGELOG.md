@@ -1,5 +1,10 @@
 # Journal des versions
 
+## 0.8.1 — 2026-09-23
+
+- Chaque paquet composer remonte l'hôte qui l'a distribué (`host`, tiré de `dist.url` du `composer.lock`) : packagist pour
+  presque tous, repo.magento.com pour ce que Magento installe lui-même. Le nom d'hôte seul, jamais l'adresse.
+
 ## 0.8.0 — 2026-09-23
 
 - TYPO3 : reconnu par `Typo3Version.php`, en mode composer (`vendor/typo3/cms-core`, à la racine du projet) comme en
