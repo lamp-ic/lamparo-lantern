@@ -9,39 +9,23 @@ Son code tient dans un seul fichier, sans dépendance, PHP 7.4 ou plus, que vous
 
 ## Installation par composer
 
-### Drupal
-
 ```bash
 composer require lamparo/lantern
 ```
 
-puis, dans le `composer.json` du projet, autorisez le paquet auprès du scaffold de Drupal :
+Le fichier arrive dans `vendor/`, où il n'est pas servi — c'est voulu. Il reste à le copier à la racine web, et
+cela dépend de ce qui fait tourner le site. Choisissez votre ligne, elle se recopie telle quelle :
 
-```json
-"extra": {
-    "drupal-scaffold": {
-        "allowed-packages": ["lamparo/lantern"]
-    }
-}
-```
+| Site | Ce qu'il faut ajouter au `composer.json` du projet |
+|---|---|
+| **Drupal** | rien à copier : le scaffold s'en charge. Autorisez seulement le paquet : `"extra": {"drupal-scaffold": {"allowed-packages": ["lamparo/lantern"]}}` |
+| **Symfony**, **Laravel** | `"scripts": {"post-install-cmd": ["cp vendor/lamparo/lantern/lamparo.php public/lamparo.php"], "post-update-cmd": ["cp vendor/lamparo/lantern/lamparo.php public/lamparo.php"]}` |
+| **WordPress** (Bedrock) | même script, vers `web/lamparo.php` |
+| **PrestaShop**, **Joomla**, **WordPress** classique, **sur mesure** à la racine | même script, vers `lamparo.php` (la racine du projet est la racine web) |
 
-À chaque `composer install` ou `composer update`, le scaffold recopie `lamparo.php` à la racine web. Mettre la
-lanterne à jour, c'est mettre le paquet à jour : rien d'autre ne change.
-
-### Symfony et sites sur mesure
-
-```bash
-composer require lamparo/lantern
-```
-
-puis un script qui copie le fichier vers votre racine web :
-
-```json
-"scripts": {
-    "post-install-cmd": ["cp vendor/lamparo/lantern/lamparo.php public/lamparo.php"],
-    "post-update-cmd": ["cp vendor/lamparo/lantern/lamparo.php public/lamparo.php"]
-}
-```
+Dans tous les cas, chaque `composer install` ou `composer update` remet la lanterne à jour : mettre à jour la lanterne,
+c'est mettre à jour le paquet, rien d'autre ne change. Une extension WordPress officielle viendra après le lancement
+de lamparo ; d'ici là, un WordPress sans composer se pose par le fichier direct.
 
 ### Sans composer
 
