@@ -1,5 +1,10 @@
 # Journal des versions
 
+## 0.7.0 — 2026-09-23
+
+- PrestaShop : les modules installés se lisent par le `config.xml` que PrestaShop écrit à l'installation — nom
+  affiché, version, auteur. Un module seulement déposé, sans ce fichier, n'est pas listé. Rien du PHP du module n'est lu.
+
 ## 0.6.1 — 2026-09-23
 
 - Joomla : un paquet livré avec le cœur — le pack de langue en-GB, par exemple — n'a pas de ligne, comme les extensions du cœur.
