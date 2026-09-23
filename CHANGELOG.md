@@ -1,5 +1,10 @@
 # Journal des versions
 
+## 0.7.1 — 2026-09-23
+
+- PrestaShop 8 et 9 : la version se lit dans `src/Core/Version.php`, là où elle vit ; `AppKernel` ne fait qu'y renvoyer et
+  la boutique passait pour un Symfony.
+
 ## 0.7.0 — 2026-09-23
 
 - PrestaShop : les modules installés se lisent par le `config.xml` que PrestaShop écrit à l'installation — nom
