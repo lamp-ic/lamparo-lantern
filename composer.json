@@ -1,0 +1,23 @@
+{
+    "name": "lamparo/lantern",
+    "description": "La lanterne de lamparo : un fichier posé sur un site pour en lire l'état, en lecture seule.",
+    "type": "library",
+    "license": "MIT",
+    "homepage": "https://lamparo.app",
+    "keywords": ["lamparo", "monitoring", "drupal", "wordpress", "php"],
+    "support": {
+        "docs": "https://lamparo.dev",
+        "email": "bonjour@lamparo.app",
+        "source": "https://github.com/lamp-ic/lamparo-lantern"
+    },
+    "require": {
+        "php": ">=7.4"
+    },
+    "extra": {
+        "drupal-scaffold": {
+            "file-mapping": {
+                "[web-root]/lamparo.php": "lamparo.php"
+            }
+        }
+    }
+}
