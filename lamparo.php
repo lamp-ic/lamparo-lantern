@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.4.0
+ * @version 0.5.0
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.4.0');
+define('LAMPARO_PROBE_VERSION', '0.5.0');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -46,6 +46,8 @@ define('LAMPARO_MAX_SKEW', 300);
 define('LAMPARO_MAX_PACKAGES', 2000);
 define('LAMPARO_MAX_COMPONENTS', 500);
 define('LAMPARO_MAX_HEADER_BYTES', 8192);
+/** Un manifeste d'extension Joomla liste ses fichiers avant de nommer son serveur de mise à jour : on lit plus loin, mais jamais sans borne. */
+define('LAMPARO_MAX_MANIFEST_BYTES', 65536);
 
 /**
  * Au-delà, on ne lit pas le composer.lock du tout. Six méga-octets de JSON pèsent environ quatre fois cela une fois
@@ -654,7 +656,7 @@ function lamparo_scan_drupal_infos(string $dir, string $type, string $origin, ar
 }
 
 // ---------------------------------------------------------------------------
-// PrestaShop / Joomla (best effort)
+// PrestaShop (best effort) et Joomla
 // ---------------------------------------------------------------------------
 
 function lamparo_detect_prestashop(array $root, array &$errors): ?array
@@ -689,32 +691,112 @@ function lamparo_detect_prestashop(array $root, array &$errors): ?array
 
 function lamparo_detect_joomla(array $root, array &$errors): ?array
 {
-    $candidates = [
-        $root['web'] . '/libraries/src/Version.php',
-        $root['web'] . '/libraries/cms/version/version.php',
-    ];
+    foreach ([$root['web'], $root['app']] as $base) {
+        foreach (['/libraries/src/Version.php', '/libraries/cms/version/version.php'] as $candidate) {
+            if (!is_file($base . $candidate)) {
+                continue;
+            }
+            $major = lamparo_match_in_file($base . $candidate, '/MAJOR_VERSION\s*=\s*(\d+)/');
+            $minor = lamparo_match_in_file($base . $candidate, '/MINOR_VERSION\s*=\s*(\d+)/');
+            $patch = lamparo_match_in_file($base . $candidate, '/PATCH_VERSION\s*=\s*(\d+)/');
+            if ($major === null) {
+                continue;
+            }
 
-    foreach ($candidates as $candidate) {
-        if (!is_file($candidate)) {
-            continue;
-        }
-        $major = lamparo_match_in_file($candidate, '/MAJOR_VERSION\s*=\s*(\d+)/');
-        $minor = lamparo_match_in_file($candidate, '/MINOR_VERSION\s*=\s*(\d+)/');
-        $patch = lamparo_match_in_file($candidate, '/PATCH_VERSION\s*=\s*(\d+)/');
-
-        if ($major !== null) {
             return [
                 'cms' => [
                     'type'      => 'joomla',
                     'version'   => implode('.', array_filter([$major, $minor, $patch], 'strlen')),
-                    'detection' => 'libraries/src/Version.php',
+                    'detection' => ltrim($candidate, '/'),
                 ],
-                'components' => [],
+                'components' => lamparo_scan_joomla_extensions($base, $errors),
             ];
         }
     }
 
     return null;
+}
+
+/**
+ * Les extensions d'un Joomla se lisent dans leurs manifestes XML, un par extension : le nom, la version, l'auteur et
+ * le serveur de mise à jour. Joomla n'a pas de dépôt central de versions : c'est ce serveur, déclaré par l'éditeur,
+ * que lamparo interrogera. Les extensions livrées avec Joomla (auteur « Joomla! Project ») sont le cœur, dont la
+ * version se lit ailleurs : elles n'ont pas leur ligne.
+ *
+ *   composants  administrator/components/com_x/*.xml         → com_x
+ *   modules     modules/mod_x/mod_x.xml, administrator/modules/mod_x/mod_x.xml → mod_x
+ *   plugins     plugins/<groupe>/<élément>/<élément>.xml    → plg_<groupe>_<élément>
+ *   templates   templates/<nom>/templateDetails.xml, administrator/templates/… → <nom>
+ */
+function lamparo_scan_joomla_extensions(string $joomla, array &$errors): array
+{
+    $components = [];
+    $full = false;
+    $add = static function (string $type, string $slug, string $manifest, string $client) use (&$components, &$full, &$errors): void {
+        if ($full) {
+            return;
+        }
+        $xml = lamparo_read_head($manifest, LAMPARO_MAX_MANIFEST_BYTES);
+        if ($xml === '' || stripos($xml, '<extension') === false) {
+            return;
+        }
+        $author = lamparo_match_in_string($xml, '~<author>\s*([^<]+?)\s*</author>~i');
+        if ($author !== null && preg_match('~joomla!?\s*project~i', $author) === 1) {
+            return;
+        }
+        $name = lamparo_match_in_string($xml, '~<name>\s*([^<]+?)\s*</name>~i');
+        if ($name === null) {
+            return;
+        }
+        $components[] = [
+            'type'       => $type,
+            'slug'       => $slug,
+            'name'       => $name,
+            'version'    => lamparo_match_in_string($xml, '~<version>\s*([^<]+?)\s*</version>~i'),
+            'author'     => $author,
+            'client'     => $client,
+            // La première adresse de <updateservers> : là où l'éditeur publie ses versions. Rien n'est appelé d'ici.
+            'update_url' => lamparo_match_in_string($xml, '~<server\b[^>]*>\s*(https?://[^<\s]+)\s*</server>~i'),
+            'source'     => 'manifest',
+        ];
+        if (count($components) >= LAMPARO_MAX_COMPONENTS) {
+            $errors[] = ['scope' => 'components', 'reason' => 'truncated'];
+            $full = true;
+        }
+    };
+
+    // Composants : le manifeste porte le nom du composant sans son préfixe, ou avec — on prend le premier .xml qui est un manifeste.
+    foreach (lamparo_list_dirs($joomla . '/administrator/components') as $dir) {
+        if (strpos($dir, 'com_') !== 0) {
+            continue;
+        }
+        foreach ([substr($dir, 4) . '.xml', $dir . '.xml'] as $file) {
+            $manifest = $joomla . '/administrator/components/' . $dir . '/' . $file;
+            if (is_file($manifest)) {
+                $add('component', $dir, $manifest, 'administrator');
+                break;
+            }
+        }
+    }
+    foreach ([['/modules', 'site'], ['/administrator/modules', 'administrator']] as [$folder, $client]) {
+        foreach (lamparo_list_dirs($joomla . $folder) as $dir) {
+            if (strpos($dir, 'mod_') === 0) {
+                $add('module', $dir, $joomla . $folder . '/' . $dir . '/' . $dir . '.xml', $client);
+            }
+        }
+    }
+    foreach (lamparo_list_dirs($joomla . '/plugins') as $group) {
+        foreach (lamparo_list_dirs($joomla . '/plugins/' . $group) as $element) {
+            $add('plugin', 'plg_' . $group . '_' . $element, $joomla . '/plugins/' . $group . '/' . $element . '/' . $element . '.xml', 'site');
+        }
+    }
+    foreach ([['/templates', 'site'], ['/administrator/templates', 'administrator']] as [$folder, $client]) {
+        foreach (lamparo_list_dirs($joomla . $folder) as $dir) {
+            $add('template', $dir, $joomla . $folder . '/' . $dir . '/templateDetails.xml', $client);
+        }
+    }
+
+    return $components;
 }
 
 // ---------------------------------------------------------------------------
@@ -743,7 +825,7 @@ function lamparo_list_dirs(string $dir): array
 }
 
 /** Lit uniquement l'en-tête d'un fichier (métadonnées), jamais son contenu entier. */
-function lamparo_read_head(string $path): string
+function lamparo_read_head(string $path, int $bytes = LAMPARO_MAX_HEADER_BYTES): string
 {
     if (!is_file($path) || !is_readable($path)) {
         return '';
@@ -752,7 +834,7 @@ function lamparo_read_head(string $path): string
     if ($handle === false) {
         return '';
     }
-    $head = (string) fread($handle, LAMPARO_MAX_HEADER_BYTES);
+    $head = (string) fread($handle, $bytes);
     fclose($handle);
 
     return $head;
