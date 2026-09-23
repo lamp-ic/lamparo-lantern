@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.7.0
+ * @version 0.7.1
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.7.0');
+define('LAMPARO_PROBE_VERSION', '0.7.1');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -661,7 +661,10 @@ function lamparo_scan_drupal_infos(string $dir, string $type, string $origin, ar
 
 function lamparo_detect_prestashop(array $root, array &$errors): ?array
 {
+    // PrestaShop 8 et 9 écrivent la version dans src/Core/Version.php, et AppKernel ne fait qu'y renvoyer
+    // (`const VERSION = Version::VERSION`) ; 1.7 la met dans config/settings.inc.php ou defines.inc.php.
     $candidates = [
+        $root['web'] . '/src/Core/Version.php',
         $root['web'] . '/app/AppKernel.php',
         $root['web'] . '/config/settings.inc.php',
         $root['web'] . '/config/defines.inc.php',
