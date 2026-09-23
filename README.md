@@ -33,14 +33,26 @@ Téléchargez `lamparo.php` depuis votre espace lamparo, ou depuis ce dépôt, e
 
 ## La clé
 
-La clé ne va jamais dans ce fichier ni dans git. Elle se définit sur le serveur, dans une variable d'environnement
-`LAMPARO_KEY`, ou dans un fichier `lamparo-key.php` posé à côté, exclu de git :
+La clé ne va jamais dans le fichier ni dans git. Elle se définit **sur le serveur de production**, dans une variable
+d'environnement `LAMPARO_KEY` — c'est la voie recommandée, celle que lamparo affiche en premier :
+
+| Où | Comment |
+|---|---|
+| Plesk, cPanel, o2switch | le panneau, rubrique variables d'environnement PHP du domaine |
+| Apache (`.htaccess` ou vhost) | `SetEnv LAMPARO_KEY "k_xxxxxxxx:secret"` |
+| nginx + PHP-FPM | `fastcgi_param LAMPARO_KEY "k_xxxxxxxx:secret";` dans le bloc `server` |
+| PHP-FPM (pool) | `env[LAMPARO_KEY] = "k_xxxxxxxx:secret"` |
+
+À défaut, un fichier `lamparo-key.php` posé à côté, **exclu de git** — moins sûr, parce qu'un fichier peut finir dans
+un dépôt ou être servi en clair par un serveur mal configuré ; à réserver aux hébergements où l'on n'a pas la main
+sur l'environnement :
 
 ```php
 <?php return 'k_xxxxxxxx:secret';
 ```
 
-Sans clé, la lanterne se tait : une préproduction ne parle jamais.
+Sans clé, la lanterne se tait : une préproduction ne parle jamais. La clé de chaque site se trouve dans votre espace
+lamparo, à la pose ; elle ne s'affiche que tant qu'elle attend sa première réponse.
 
 ## Versions
 
