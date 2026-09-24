@@ -1,5 +1,10 @@
 # Journal des versions
 
+## 0.10.1 — 2026-09-24
+
+- Drupal : un fichier `.info` ou `.info.yml` se lit jusqu'à soixante-quatre kilo-octets — Views liste trois cents fichiers
+  avant sa version, qui restait illisible.
+
 ## 0.10.0 — 2026-09-24
 
 - Drupal 7 : reconnu par `includes/bootstrap.inc`, ses modules et thèmes lus dans `sites/all/` par leurs fichiers `.info`
