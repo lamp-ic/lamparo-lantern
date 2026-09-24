@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.10.0
+ * @version 0.10.1
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.10.0');
+define('LAMPARO_PROBE_VERSION', '0.10.1');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -645,7 +645,7 @@ function lamparo_scan_drupal_infos(string $dir, string $type, string $origin, ar
         if (!is_file($infoFile)) {
             continue;
         }
-        $head = lamparo_read_head($infoFile);
+        $head = lamparo_read_head($infoFile, LAMPARO_MAX_MANIFEST_BYTES);
         $components[] = [
             'type'    => $type,
             'slug'    => $slug,
@@ -717,7 +717,8 @@ function lamparo_scan_drupal7_infos(string $dir, string $type, ?string $origin, 
         if (!is_file($infoFile)) {
             continue;
         }
-        $head = lamparo_read_head($infoFile);
+        // Un .info de Drupal 7 liste ses fichiers avant le bloc d'empaquetage : Views en porte dix kilo-octets.
+        $head = lamparo_read_head($infoFile, LAMPARO_MAX_MANIFEST_BYTES);
         $components[] = [
             'type'    => $type,
             'slug'    => $slug,
