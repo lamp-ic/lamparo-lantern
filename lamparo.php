@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.8.1
+ * @version 0.9.0
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.8.1');
+define('LAMPARO_PROBE_VERSION', '0.9.0');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -351,6 +351,7 @@ function lamparo_collect(array $root, array &$errors): array
         'lamparo_detect_prestashop',
         'lamparo_detect_joomla',
         'lamparo_detect_typo3',
+        'lamparo_detect_spip',
     ];
 
     foreach ($detectors as $detector) {
@@ -797,6 +798,72 @@ function lamparo_scan_typo3_extensions(string $web, array &$errors): array
             'version' => lamparo_match_in_string($php, '/[\'"]version[\'"]\s*=>\s*[\'"]([0-9][^\'"]*)[\'"]/'),
             'author'  => lamparo_match_in_string($php, '/[\'"]author[\'"]\s*=>\s*[\'"]([^\'"]+)[\'"]/'),
             'source'  => 'ext_emconf.php',
+        ];
+        if (count($components) >= LAMPARO_MAX_COMPONENTS) {
+            $errors[] = ['scope' => 'components', 'reason' => 'truncated'];
+            break;
+        }
+    }
+
+    return $components;
+}
+
+/**
+ * SPIP. La version vit dans ecrire/inc_version.php ($spip_version_branche). Les plugins installés sont dans
+ * plugins/ — directement, ou sous plugins/auto/ quand SVP les a téléchargés —, chacun décrit par un paquet.xml ;
+ * ceux de plugins-dist/ sont livrés avec SPIP et se mettent à jour avec lui : pas de ligne.
+ */
+function lamparo_detect_spip(array $root, array &$errors): ?array
+{
+    $file = $root['web'] . '/ecrire/inc_version.php';
+    if (!is_file($file)) {
+        return null;
+    }
+    $version = lamparo_match_in_file($file, '/\$spip_version_branche\s*=\s*[\'"]([0-9][^\'"]*)[\'"]/');
+    if ($version === null) {
+        return null;
+    }
+
+    return [
+        'cms' => ['type' => 'spip', 'version' => $version, 'detection' => 'ecrire/inc_version.php'],
+        'components' => lamparo_scan_spip_plugins($root['web'], $errors),
+    ];
+}
+
+function lamparo_scan_spip_plugins(string $web, array &$errors): array
+{
+    $components = [];
+    $dirs = [];
+    foreach (lamparo_list_dirs($web . '/plugins') as $dir) {
+        if ($dir === 'auto') {
+            foreach (lamparo_list_dirs($web . '/plugins/auto') as $sub) {
+                $dirs[] = 'auto/' . $sub;
+            }
+        } else {
+            $dirs[] = $dir;
+        }
+    }
+    foreach ($dirs as $dir) {
+        $manifest = $web . '/plugins/' . $dir . '/paquet.xml';
+        if (!is_file($manifest)) {
+            continue;
+        }
+        $xml = lamparo_read_head($manifest, LAMPARO_MAX_MANIFEST_BYTES);
+        if (preg_match('~<paquet\b([^>]*)>~i', $xml, $m) !== 1) {
+            continue;
+        }
+        $prefix = lamparo_match_in_string($m[1], '~\bprefix="([^"]+)"~i');
+        if ($prefix === null) {
+            continue;
+        }
+        $components[] = [
+            'type'    => 'plugin',
+            'slug'    => strtolower($prefix),
+            'name'    => lamparo_xml_text($xml, 'nom') ?? $prefix,
+            'version' => lamparo_match_in_string($m[1], '~\bversion="([^"]+)"~i'),
+            'author'  => lamparo_xml_text($xml, 'auteur'),
+            'state'   => lamparo_match_in_string($m[1], '~\betat="([^"]+)"~i'),
+            'source'  => 'paquet.xml',
         ];
         if (count($components) >= LAMPARO_MAX_COMPONENTS) {
             $errors[] = ['scope' => 'components', 'reason' => 'truncated'];
