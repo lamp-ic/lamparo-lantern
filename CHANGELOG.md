@@ -1,5 +1,11 @@
 # Journal des versions
 
+## 0.10.0 — 2026-09-24
+
+- Drupal 7 : reconnu par `includes/bootstrap.inc`, ses modules et thèmes lus dans `sites/all/` par leurs fichiers `.info`
+  (nom, version, `project` du script d'empaquetage, origine selon le dossier contrib ou custom). Les modules du cœur,
+  dans `modules/`, ne sont pas lus.
+
 ## 0.9.1 — 2026-09-24
 
 - SPIP : la version se lit au-delà des huit premiers kilo-octets d'`ecrire/inc_version.php`, où elle se trouve vraiment.
