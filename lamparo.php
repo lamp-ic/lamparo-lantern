@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.12.0
+ * @version 0.12.1
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.12.0');
+define('LAMPARO_PROBE_VERSION', '0.12.1');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -58,6 +58,13 @@ define('LAMPARO_MAX_LOCK_BYTES', 6291456);
 
 /** Plus de clés que ça, ce n'est plus un site partagé : c'est une erreur de configuration. */
 define('LAMPARO_MAX_KEYS', 10);
+
+/**
+ * Un package.json pèse quelques kilo-octets ; au-delà d'un méga-octet on ne le lit pas. TOUTES les constantes vivent ici,
+ * avant l'entrée : sur le web, lamparo_main() s'exécute au chargement du fichier, et un define() placé plus bas n'existe
+ * pas encore — c'est ce qui a cassé la 0.12.0.
+ */
+define('LAMPARO_MAX_NPM_MANIFEST_BYTES', 1048576);
 
 // La lanterne n'a aucun usage en CLI ; les tests la chargent avec LAMPARO_TESTING défini, sans la lancer.
 if (PHP_SAPI === 'cli') {
@@ -457,13 +464,12 @@ function lamparo_read_composer_lock(string $appRoot, array &$errors): array
 
 // ---------------------------------------------------------------------------
 // package.json (0.12.0) : un site PHP avec un outillage JavaScript déclare ses paquets npm à la racine du projet, à
-// côté de composer.lock. On lit les dépendances directes — jamais les dev — et leur version installée dans
+// côté de composer.lock. On lit les dépendances directes ET celles de développement (Laravel range Vue et Vite dans
+// devDependencies : ce sont elles qui finissent dans les assets compilés), chacune disant si elle est de dev, et leur version installée dans
 // package-lock.json (v1, v2 ou v3), sinon dans node_modules/<nom>/package.json ; sinon null, avec la contrainte
 // déclarée à côté. Chaque paquet porte son registre : la plateforme juge les uns chez packagist, les autres sur npm.
 // ---------------------------------------------------------------------------
 
-/** Un package.json pèse quelques kilo-octets ; au-delà d'un méga-octet on ne le lit pas. */
-define('LAMPARO_MAX_NPM_MANIFEST_BYTES', 1048576);
 
 function lamparo_read_npm_manifest(string $appRoot, array &$errors): array
 {
@@ -483,13 +489,20 @@ function lamparo_read_npm_manifest(string $appRoot, array &$errors): array
 
         return [];
     }
-    $declared = isset($manifest['dependencies']) && is_array($manifest['dependencies']) ? $manifest['dependencies'] : [];
+    $declared = [];
+    foreach (['dependencies' => false, 'devDependencies' => true] as $section => $dev) {
+        foreach (isset($manifest[$section]) && is_array($manifest[$section]) ? $manifest[$section] : [] as $name => $constraint) {
+            if (!isset($declared[$name])) {
+                $declared[$name] = [$constraint, $dev];
+            }
+        }
+    }
     if ($declared === []) {
         return [];
     }
     $locked = lamparo_read_npm_lock($appRoot, $errors);
     $packages = [];
-    foreach ($declared as $name => $constraint) {
+    foreach ($declared as $name => [$constraint, $dev]) {
         // Un nom npm, à portée ou non : rien d'autre ne devient jamais un morceau de chemin.
         if (!is_string($name) || preg_match('#^(?:@[a-z0-9][a-z0-9._-]{0,213}/)?[a-z0-9][a-z0-9._-]{0,213}$#', $name) !== 1) {
             continue;
@@ -498,6 +511,7 @@ function lamparo_read_npm_manifest(string $appRoot, array &$errors): array
             'name'     => $name,
             'version'  => $locked[$name] ?? lamparo_npm_installed_version($appRoot, $name),
             'declared' => is_string($constraint) ? $constraint : null,
+            'dev'      => $dev,
             'registry' => 'npm',
             'source'   => 'package.json',
         ];
