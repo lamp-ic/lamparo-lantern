@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.11.0
+ * @version 0.12.0
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.11.0');
+define('LAMPARO_PROBE_VERSION', '0.12.0');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -341,8 +341,9 @@ function lamparo_collect(array $root, array &$errors): array
         'components' => [],
     ];
 
-    // Paquets composer : utile même sans CMS (site sur mesure).
-    $facts['packages'] = lamparo_read_composer_lock($root['app'], $errors);
+    // Paquets composer : utile même sans CMS (site sur mesure). Puis les paquets npm d'un outillage JavaScript
+    // (Vue, React, Vite) déclaré à côté : un site PHP peut avoir deux registres, chaque paquet dit le sien.
+    $facts['packages'] = array_slice(array_merge(lamparo_read_composer_lock($root['app'], $errors), lamparo_read_npm_manifest($root['app'], $errors)), 0, LAMPARO_MAX_PACKAGES);
 
     // Détection CMS, dans l'ordre des marqueurs les plus fiables.
     $detectors = [
@@ -452,6 +453,115 @@ function lamparo_read_composer_lock(string $appRoot, array &$errors): array
     }
 
     return $packages;
+}
+
+// ---------------------------------------------------------------------------
+// package.json (0.12.0) : un site PHP avec un outillage JavaScript déclare ses paquets npm à la racine du projet, à
+// côté de composer.lock. On lit les dépendances directes — jamais les dev — et leur version installée dans
+// package-lock.json (v1, v2 ou v3), sinon dans node_modules/<nom>/package.json ; sinon null, avec la contrainte
+// déclarée à côté. Chaque paquet porte son registre : la plateforme juge les uns chez packagist, les autres sur npm.
+// ---------------------------------------------------------------------------
+
+/** Un package.json pèse quelques kilo-octets ; au-delà d'un méga-octet on ne le lit pas. */
+define('LAMPARO_MAX_NPM_MANIFEST_BYTES', 1048576);
+
+function lamparo_read_npm_manifest(string $appRoot, array &$errors): array
+{
+    $path = $appRoot . '/package.json';
+    if (!is_file($path) || !is_readable($path)) {
+        return [];
+    }
+    $size = @filesize($path);
+    if ($size === false || $size > LAMPARO_MAX_NPM_MANIFEST_BYTES) {
+        $errors[] = ['scope' => 'npm', 'reason' => 'package.json too large'];
+
+        return [];
+    }
+    $manifest = json_decode((string) @file_get_contents($path), true);
+    if (!is_array($manifest)) {
+        $errors[] = ['scope' => 'npm', 'reason' => 'package.json unparsable'];
+
+        return [];
+    }
+    $declared = isset($manifest['dependencies']) && is_array($manifest['dependencies']) ? $manifest['dependencies'] : [];
+    if ($declared === []) {
+        return [];
+    }
+    $locked = lamparo_read_npm_lock($appRoot, $errors);
+    $packages = [];
+    foreach ($declared as $name => $constraint) {
+        // Un nom npm, à portée ou non : rien d'autre ne devient jamais un morceau de chemin.
+        if (!is_string($name) || preg_match('#^(?:@[a-z0-9][a-z0-9._-]{0,213}/)?[a-z0-9][a-z0-9._-]{0,213}$#', $name) !== 1) {
+            continue;
+        }
+        $packages[] = [
+            'name'     => $name,
+            'version'  => $locked[$name] ?? lamparo_npm_installed_version($appRoot, $name),
+            'declared' => is_string($constraint) ? $constraint : null,
+            'registry' => 'npm',
+            'source'   => 'package.json',
+        ];
+        if (count($packages) >= LAMPARO_MAX_PACKAGES) {
+            $errors[] = ['scope' => 'npm', 'reason' => 'truncated at ' . LAMPARO_MAX_PACKAGES];
+            break;
+        }
+    }
+
+    return $packages;
+}
+
+/** @return array<string, string> nom → version installée, d'après package-lock.json : v2 et v3 sous packages["node_modules/<nom>"], v1 sous dependencies */
+function lamparo_read_npm_lock(string $appRoot, array &$errors): array
+{
+    $path = $appRoot . '/package-lock.json';
+    if (!is_file($path) || !is_readable($path)) {
+        return [];
+    }
+    $size = @filesize($path);
+    if ($size === false || $size > LAMPARO_MAX_LOCK_BYTES) {
+        $errors[] = ['scope' => 'npm', 'reason' => 'package-lock.json too large'];
+
+        return [];
+    }
+    $data = json_decode((string) @file_get_contents($path), true);
+    if (!is_array($data)) {
+        $errors[] = ['scope' => 'npm', 'reason' => 'package-lock.json unparsable'];
+
+        return [];
+    }
+    $versions = [];
+    if (isset($data['packages']) && is_array($data['packages'])) {
+        foreach ($data['packages'] as $key => $entry) {
+            // Seuls les paquets de premier niveau : « node_modules/a/node_modules/b » est la copie imbriquée d'un autre.
+            if (is_string($key) && strpos($key, 'node_modules/') === 0 && substr_count($key, 'node_modules/') === 1 && is_array($entry) && isset($entry['version']) && is_string($entry['version'])) {
+                $versions[substr($key, 13)] = $entry['version'];
+            }
+        }
+    } elseif (isset($data['dependencies']) && is_array($data['dependencies'])) {
+        foreach ($data['dependencies'] as $name => $entry) {
+            if (is_string($name) && is_array($entry) && isset($entry['version']) && is_string($entry['version'])) {
+                $versions[$name] = $entry['version'];
+            }
+        }
+    }
+
+    return $versions;
+}
+
+/** La version installée d'un paquet npm, dans son propre package.json sous node_modules ; le nom a été validé avant. */
+function lamparo_npm_installed_version(string $appRoot, string $name): ?string
+{
+    $path = $appRoot . '/node_modules/' . $name . '/package.json';
+    if (!is_file($path) || !is_readable($path)) {
+        return null;
+    }
+    $size = @filesize($path);
+    if ($size === false || $size > LAMPARO_MAX_NPM_MANIFEST_BYTES) {
+        return null;
+    }
+    $manifest = json_decode((string) @file_get_contents($path), true);
+
+    return is_array($manifest) && isset($manifest['version']) && is_string($manifest['version']) ? $manifest['version'] : null;
 }
 
 // ---------------------------------------------------------------------------
