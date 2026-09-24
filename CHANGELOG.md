@@ -1,5 +1,10 @@
 # Journal des versions
 
+## 0.9.0 — 2026-09-24
+
+- SPIP : reconnu par `ecrire/inc_version.php` ; les plugins installés (`plugins/` et `plugins/auto/`) se lisent par leur
+  `paquet.xml` — préfixe, nom, version, auteur, état. Ceux de `plugins-dist/` sont SPIP lui-même et n'ont pas leur ligne.
+
 ## 0.8.1 — 2026-09-23
 
 - Chaque paquet composer remonte l'hôte qui l'a distribué (`host`, tiré de `dist.url` du `composer.lock`) : packagist pour
