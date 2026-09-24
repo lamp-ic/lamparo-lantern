@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.9.0
+ * @version 0.9.1
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.9.0');
+define('LAMPARO_PROBE_VERSION', '0.9.1');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -819,7 +819,8 @@ function lamparo_detect_spip(array $root, array &$errors): ?array
     if (!is_file($file)) {
         return null;
     }
-    $version = lamparo_match_in_file($file, '/\$spip_version_branche\s*=\s*[\'"]([0-9][^\'"]*)[\'"]/');
+    // La version est au milieu d'un fichier de vingt kilo-octets, bien après les huit premiers : on lit plus loin.
+    $version = lamparo_match_in_file($file, '/\$spip_version_branche\s*=\s*[\'"]([0-9][^\'"]*)[\'"]/', LAMPARO_MAX_MANIFEST_BYTES);
     if ($version === null) {
         return null;
     }
@@ -1097,9 +1098,9 @@ function lamparo_read_head(string $path, int $bytes = LAMPARO_MAX_HEADER_BYTES):
     return $head;
 }
 
-function lamparo_match_in_file(string $path, string $pattern): ?string
+function lamparo_match_in_file(string $path, string $pattern, int $bytes = LAMPARO_MAX_HEADER_BYTES): ?string
 {
-    return lamparo_match_in_string(lamparo_read_head($path), $pattern);
+    return lamparo_match_in_string(lamparo_read_head($path, $bytes), $pattern);
 }
 
 function lamparo_match_in_string(string $subject, string $pattern): ?string
