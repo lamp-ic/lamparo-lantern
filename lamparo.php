@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.9.1
+ * @version 0.10.0
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.9.1');
+define('LAMPARO_PROBE_VERSION', '0.10.0');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -348,6 +348,7 @@ function lamparo_collect(array $root, array &$errors): array
     $detectors = [
         'lamparo_detect_wordpress',
         'lamparo_detect_drupal',
+        'lamparo_detect_drupal7',
         'lamparo_detect_prestashop',
         'lamparo_detect_joomla',
         'lamparo_detect_typo3',
@@ -668,6 +669,72 @@ function lamparo_scan_drupal_infos(string $dir, string $type, string $origin, ar
 // ---------------------------------------------------------------------------
 // PrestaShop (best effort) et Joomla
 // ---------------------------------------------------------------------------
+
+/**
+ * Drupal 7 : un autre logiciel sous le même nom. Pas de dossier core/, pas de composer ; la version dans
+ * includes/bootstrap.inc, les modules et thèmes dans sites/all/, décrits par des fichiers .info (clé = valeur), où le
+ * script d'empaquetage de drupal.org ajoute « project = "…" » comme il ajoute « project: » en 8 et suivants.
+ */
+function lamparo_detect_drupal7(array $root, array &$errors): ?array
+{
+    $file = $root['web'] . '/includes/bootstrap.inc';
+    if (!is_file($file)) {
+        return null;
+    }
+    $version = lamparo_match_in_file($file, '/define\(\s*[\'"]VERSION[\'"]\s*,\s*[\'"]([0-9][^\'"]*)[\'"]\s*\)/');
+    if ($version === null) {
+        return null;
+    }
+    $components = [];
+    // Le dossier dit l'origine quand le site range contrib et custom à part ; ailleurs on ne l'invente pas.
+    $folders = [
+        ['/sites/all/modules/contrib', 'module', 'contrib'],
+        ['/sites/all/modules/custom',  'module', 'custom'],
+        ['/sites/all/modules',         'module', null],
+        ['/sites/all/themes',          'theme',  null],
+    ];
+    foreach ($folders as [$folder, $type, $origin]) {
+        $components = array_merge($components, lamparo_scan_drupal7_infos($root['web'] . $folder, $type, $origin, $errors));
+    }
+
+    return [
+        'cms' => ['type' => 'drupal', 'version' => $version, 'detection' => 'includes/bootstrap.inc'],
+        'components' => $components,
+    ];
+}
+
+function lamparo_scan_drupal7_infos(string $dir, string $type, ?string $origin, array &$errors): array
+{
+    if (!is_dir($dir) || !is_readable($dir)) {
+        return [];
+    }
+    $components = [];
+    foreach (lamparo_list_dirs($dir) as $slug) {
+        if ($slug === 'contrib' || $slug === 'custom') {
+            continue; // lus à part, avec leur origine
+        }
+        $infoFile = $dir . '/' . $slug . '/' . $slug . '.info';
+        if (!is_file($infoFile)) {
+            continue;
+        }
+        $head = lamparo_read_head($infoFile);
+        $components[] = [
+            'type'    => $type,
+            'slug'    => $slug,
+            'name'    => lamparo_match_in_string($head, '/^name\s*=\s*[\'"]?([^\'"\n]+?)[\'"]?\s*$/mi'),
+            'version' => lamparo_match_in_string($head, '/^version\s*=\s*[\'"]?([^\'"\n]+?)[\'"]?\s*$/mi'),
+            'origin'  => $origin,
+            'project' => lamparo_match_in_string($head, '/^project\s*=\s*[\'"]?([^\'"\n]+?)[\'"]?\s*$/mi'),
+            'source'  => 'info',
+        ];
+        if (count($components) >= LAMPARO_MAX_COMPONENTS) {
+            $errors[] = ['scope' => 'components', 'reason' => 'truncated'];
+            break;
+        }
+    }
+
+    return $components;
+}
 
 function lamparo_detect_prestashop(array $root, array &$errors): ?array
 {
