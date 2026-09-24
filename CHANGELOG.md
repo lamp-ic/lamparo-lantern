@@ -1,5 +1,10 @@
 # Journal des versions
 
+## 0.11.0 — 2026-09-24
+
+- WordPress : la disposition Bedrock est reconnue — le cœur dans `wp/`, les extensions et thèmes dans `app/` à côté de
+  la racine web où la lanterne est posée, le `composer.lock` un niveau au-dessus.
+
 ## 0.10.1 — 2026-09-24
 
 - Drupal : un fichier `.info` ou `.info.yml` se lit jusqu'à soixante-quatre kilo-octets — Views liste trois cents fichiers
