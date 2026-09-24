@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.10.1
+ * @version 0.11.0
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.10.1');
+define('LAMPARO_PROBE_VERSION', '0.11.0');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -460,35 +460,33 @@ function lamparo_read_composer_lock(string $appRoot, array &$errors): array
 
 function lamparo_detect_wordpress(array $root, array &$errors): ?array
 {
-    $versionFile = null;
-    foreach ([$root['web'], $root['app']] as $base) {
-        $candidate = $base . '/wp-includes/version.php';
-        if (is_file($candidate)) {
-            $versionFile = $candidate;
-            $wpRoot      = $base;
-            break;
-        }
-    }
-
-    if ($versionFile === null) {
-        return null;
-    }
-
-    $version = lamparo_match_in_file($versionFile, '/\$wp_version\s*=\s*[\'"]([^\'"]+)[\'"]/');
-
-    $components = array_merge(
-        lamparo_scan_wp_plugins($wpRoot . '/wp-content/plugins', $errors),
-        lamparo_scan_wp_themes($wpRoot . '/wp-content/themes', $errors)
-    );
-
-    return [
-        'cms' => [
-            'type'      => 'wordpress',
-            'version'   => $version,
-            'detection' => 'wp-includes/version.php',
-        ],
-        'components' => $components,
+    // Classique : le cœur à la racine web, le contenu dans wp-content/. Bedrock (et les installations composer qui
+    // le suivent) : le cœur dans wp/, le contenu dans app/, à côté — la racine web reste celle où la lanterne est posée.
+    $layouts = [
+        [$root['web'], $root['web'] . '/wp-content', 'wp-includes/version.php'],
+        [$root['app'], $root['app'] . '/wp-content', 'wp-includes/version.php'],
+        [$root['web'] . '/wp', $root['web'] . '/app', 'wp/wp-includes/version.php'],
     ];
+    foreach ($layouts as [$wpRoot, $content, $detection]) {
+        $versionFile = $wpRoot . '/wp-includes/version.php';
+        if (!is_file($versionFile)) {
+            continue;
+        }
+
+        return [
+            'cms' => [
+                'type'      => 'wordpress',
+                'version'   => lamparo_match_in_file($versionFile, '/\$wp_version\s*=\s*[\'"]([^\'"]+)[\'"]/'),
+                'detection' => $detection,
+            ],
+            'components' => array_merge(
+                lamparo_scan_wp_plugins($content . '/plugins', $errors),
+                lamparo_scan_wp_themes($content . '/themes', $errors)
+            ),
+        ];
+    }
+
+    return null;
 }
 
 function lamparo_scan_wp_plugins(string $dir, array &$errors): array
