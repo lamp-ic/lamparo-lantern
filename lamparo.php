@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.12.1
+ * @version 0.13.0
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.12.1');
+define('LAMPARO_PROBE_VERSION', '0.13.0');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -361,6 +361,9 @@ function lamparo_collect(array $root, array &$errors): array
         'lamparo_detect_joomla',
         'lamparo_detect_typo3',
         'lamparo_detect_spip',
+        'lamparo_detect_grav',
+        'lamparo_detect_concrete',
+        'lamparo_detect_dotclear',
     ];
 
     foreach ($detectors as $detector) {
@@ -1059,6 +1062,161 @@ function lamparo_scan_spip_plugins(string $web, array &$errors): array
         if (count($components) >= LAMPARO_MAX_COMPONENTS) {
             $errors[] = ['scope' => 'components', 'reason' => 'truncated'];
             break;
+        }
+    }
+
+    return $components;
+}
+
+/**
+ * Grav : la version dans system/defines.php, les plugins et thèmes dans user/plugins et user/themes, chacun avec
+ * son blueprints.yaml (name, version). Pas de composer.lock exploitable : Grav se pose depuis une archive.
+ */
+function lamparo_detect_grav(array $root, array &$errors): ?array
+{
+    $file = $root['web'] . '/system/defines.php';
+    if (!is_file($file)) {
+        return null;
+    }
+    $version = lamparo_match_in_file($file, '/define\(\s*[\'"]GRAV_VERSION[\'"]\s*,\s*[\'"]([0-9][^\'"]*)[\'"]/');
+    if ($version === null) {
+        return null;
+    }
+
+    return [
+        'cms' => ['type' => 'grav', 'version' => $version, 'detection' => 'system/defines.php'],
+        'components' => lamparo_scan_grav_modules($root['web'], $errors),
+    ];
+}
+
+function lamparo_scan_grav_modules(string $web, array &$errors): array
+{
+    $components = [];
+    foreach (['plugin' => '/user/plugins', 'theme' => '/user/themes'] as $type => $dir) {
+        foreach (lamparo_list_dirs($web . $dir) as $slug) {
+            $manifest = $web . $dir . '/' . $slug . '/blueprints.yaml';
+            if (!is_file($manifest)) {
+                continue;
+            }
+            $yaml = lamparo_read_head($manifest, LAMPARO_MAX_MANIFEST_BYTES);
+            $components[] = [
+                'type'    => $type,
+                'slug'    => strtolower($slug),
+                'name'    => lamparo_match_in_string($yaml, '/^name:\s*[\'"]?([^\'"\r\n]+?)[\'"]?\s*$/m') ?? $slug,
+                'version' => lamparo_match_in_string($yaml, '/^version:\s*[\'"]?([0-9][^\'"\s]*)/m'),
+                'source'  => 'blueprints.yaml',
+            ];
+            if (count($components) >= LAMPARO_MAX_COMPONENTS) {
+                $errors[] = ['scope' => 'components', 'reason' => 'truncated'];
+                break 2;
+            }
+        }
+    }
+
+    return $components;
+}
+
+/**
+ * Concrete CMS : la version dans concrete/config/concrete.php ('version' => '9.5.4'), les paquets de la place de
+ * marché dans packages/<handle>/controller.php ($pkgHandle, $pkgVersion). Installé par composer, le cœur est aussi
+ * dans composer.lock (concrete5/core) : c'est là qu'il se juge.
+ */
+function lamparo_detect_concrete(array $root, array &$errors): ?array
+{
+    $file = $root['web'] . '/concrete/config/concrete.php';
+    if (!is_file($file)) {
+        return null;
+    }
+    $version = lamparo_match_in_file($file, '/[\'"]version[\'"]\s*=>\s*[\'"]([0-9][^\'"]*)[\'"]/');
+    if ($version === null) {
+        return null;
+    }
+
+    return [
+        'cms' => ['type' => 'concrete', 'version' => $version, 'detection' => 'concrete/config/concrete.php'],
+        'components' => lamparo_scan_concrete_packages($root['web'], $errors),
+    ];
+}
+
+function lamparo_scan_concrete_packages(string $web, array &$errors): array
+{
+    $components = [];
+    foreach (lamparo_list_dirs($web . '/packages') as $dir) {
+        $controller = $web . '/packages/' . $dir . '/controller.php';
+        if (!is_file($controller)) {
+            continue;
+        }
+        $php = lamparo_read_head($controller, LAMPARO_MAX_MANIFEST_BYTES);
+        $components[] = [
+            'type'    => 'plugin',
+            'slug'    => strtolower(lamparo_match_in_string($php, '/\$pkgHandle\s*=\s*[\'"]([a-z0-9_]+)[\'"]/i') ?? $dir),
+            'name'    => lamparo_match_in_string($php, '/\$pkgName\s*=\s*[\'"]([^\'"]+)[\'"]/') ?? $dir,
+            'version' => lamparo_match_in_string($php, '/\$pkgVersion\s*=\s*[\'"]([0-9][^\'"]*)[\'"]/'),
+            'source'  => 'controller.php',
+        ];
+        if (count($components) >= LAMPARO_MAX_COMPONENTS) {
+            $errors[] = ['scope' => 'components', 'reason' => 'truncated'];
+            break;
+        }
+    }
+
+    return $components;
+}
+
+/**
+ * Dotclear : la version dans release.json à la racine ("release_version"), les plugins et thèmes dans plugins/ et
+ * themes/, chacun déclaré par registerModule('Nom', 'description', 'Auteur', 'version') dans son _define.php.
+ */
+function lamparo_detect_dotclear(array $root, array &$errors): ?array
+{
+    $file = $root['web'] . '/release.json';
+    if (!is_file($file) || !is_dir($root['web'] . '/inc') || !is_dir($root['web'] . '/plugins')) {
+        return null;
+    }
+    $json = lamparo_read_head($file, LAMPARO_MAX_MANIFEST_BYTES);
+    if (stripos($json, 'dotclear') === false) {
+        return null;
+    }
+    $version = lamparo_match_in_string($json, '/"release_version"\s*:\s*"([0-9][^"]*)"/');
+    if ($version === null) {
+        return null;
+    }
+
+    return [
+        'cms' => ['type' => 'dotclear', 'version' => $version, 'detection' => 'release.json'],
+        'components' => lamparo_scan_dotclear_modules($root['web'], $errors),
+    ];
+}
+
+function lamparo_scan_dotclear_modules(string $web, array &$errors): array
+{
+    $components = [];
+    foreach (['plugin' => '/plugins', 'theme' => '/themes'] as $type => $dir) {
+        foreach (lamparo_list_dirs($web . $dir) as $slug) {
+            $define = $web . $dir . '/' . $slug . '/_define.php';
+            if (!is_file($define)) {
+                continue;
+            }
+            $php = lamparo_read_head($define, LAMPARO_MAX_MANIFEST_BYTES);
+            $at = strpos($php, 'registerModule(');
+            if ($at === false) {
+                continue;
+            }
+            // Les quatre premières chaînes après registerModule( : nom, description, auteur, version.
+            preg_match_all('/([\'"])((?:\\\\.|(?!\1).)*)\1/s', substr($php, $at, 4000), $strings);
+            $literals = array_map(static fn (string $raw) => stripslashes($raw), $strings[2]);
+            $components[] = [
+                'type'    => $type,
+                'slug'    => $slug,
+                'name'    => $literals[0] ?? $slug,
+                'version' => isset($literals[3]) && preg_match('/^[0-9]/', $literals[3]) === 1 ? $literals[3] : null,
+                'author'  => $literals[2] ?? null,
+                'source'  => '_define.php',
+            ];
+            if (count($components) >= LAMPARO_MAX_COMPONENTS) {
+                $errors[] = ['scope' => 'components', 'reason' => 'truncated'];
+                break 2;
+            }
         }
     }
 
