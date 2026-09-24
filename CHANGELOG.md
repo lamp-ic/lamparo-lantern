@@ -1,5 +1,9 @@
 # Journal des versions
 
+## 0.9.1 — 2026-09-24
+
+- SPIP : la version se lit au-delà des huit premiers kilo-octets d'`ecrire/inc_version.php`, où elle se trouve vraiment.
+
 ## 0.9.0 — 2026-09-24
 
 - SPIP : reconnu par `ecrire/inc_version.php` ; les plugins installés (`plugins/` et `plugins/auto/`) se lisent par leur
