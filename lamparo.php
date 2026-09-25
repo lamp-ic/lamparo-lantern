@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.14.0
+ * @version 0.14.1
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.14.0');
+define('LAMPARO_PROBE_VERSION', '0.14.1');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -768,14 +768,20 @@ function lamparo_detect_drupal(array $root, array &$errors): ?array
     // sites/*/modules et sites/*/themes : on lit les mêmes emplacements (audit du 25/09/2026, n° 8). Un composant
     // posé directement dans modules/ n'a pas de dossier pour dire son origine : « root », et sa signature drupal.org
     // (project:) dira le reste.
-    $bases = [$drupalRoot];
-    foreach (lamparo_list_dirs($drupalRoot . '/sites') as $siteDir) {
-        if (is_dir($drupalRoot . '/sites/' . $siteDir . '/modules') || is_dir($drupalRoot . '/sites/' . $siteDir . '/themes')) {
-            $bases[] = $drupalRoot . '/sites/' . $siteDir;
-        }
+    // Drupal donne la priorité au dossier du site (sites/<site>/modules) sur la racine (modules/) : on lit dans cet
+    // ordre et le premier trouvé gagne, comme Drupal (retour de l'audit, n° 8). « default » d'abord, puis les autres
+    // sites par ordre alphabétique ; chaque composant d'un dossier de site dit lequel (« site »).
+    $siteDirs = array_filter(lamparo_list_dirs($drupalRoot . '/sites'), static function (string $siteDir) use ($drupalRoot): bool {
+        return is_dir($drupalRoot . '/sites/' . $siteDir . '/modules') || is_dir($drupalRoot . '/sites/' . $siteDir . '/themes');
+    });
+    usort($siteDirs, static fn (string $a, string $b): int => ($a === 'default' ? -1 : ($b === 'default' ? 1 : strcmp($a, $b))));
+    $bases = [];
+    foreach ($siteDirs as $siteDir) {
+        $bases[] = [$drupalRoot . '/sites/' . $siteDir, $siteDir];
     }
+    $bases[] = [$drupalRoot, null];
     $seen = [];
-    foreach ($bases as $base) {
+    foreach ($bases as [$base, $siteDir]) {
         foreach (['module' => '/modules', 'theme' => '/themes'] as $type => $folder) {
             foreach ([['/contrib', 'contrib'], ['/custom', 'custom'], ['', 'root']] as [$sub, $origin]) {
                 foreach (lamparo_scan_drupal_infos($base . $folder . $sub, $type, $origin, $errors, $sub === '' ? ['contrib', 'custom'] : []) as $component) {
@@ -784,6 +790,9 @@ function lamparo_detect_drupal(array $root, array &$errors): ?array
                         continue;
                     }
                     $seen[$key] = true;
+                    if ($siteDir !== null) {
+                        $component['site'] = $siteDir;
+                    }
                     $components[] = $component;
                 }
             }
