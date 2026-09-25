@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.13.0
+ * @version 0.14.0
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.13.0');
+define('LAMPARO_PROBE_VERSION', '0.14.0');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -97,6 +97,7 @@ function lamparo_main(): void
         'probe_version' => LAMPARO_PROBE_VERSION,
         'key_id'        => $key['id'],
         'collected_at'  => gmdate('c'),
+        'nonce'         => lamparo_header('X-Lamparo-Nonce'),
         'facts'         => $facts,
         'errors'        => $errors,
     ], $key['secret']);
@@ -350,7 +351,13 @@ function lamparo_collect(array $root, array &$errors): array
 
     // Paquets composer : utile même sans CMS (site sur mesure). Puis les paquets npm d'un outillage JavaScript
     // (Vue, React, Vite) déclaré à côté : un site PHP peut avoir deux registres, chaque paquet dit le sien.
-    $facts['packages'] = array_slice(array_merge(lamparo_read_composer_lock($root['app'], $errors), lamparo_read_npm_manifest($root['app'], $errors)), 0, LAMPARO_MAX_PACKAGES);
+    $packages = array_merge(lamparo_read_composer_lock($root['app'], $errors), lamparo_read_npm_manifest($root['app'], $errors));
+    if (count($packages) > LAMPARO_MAX_PACKAGES) {
+        // Chaque registre tenait dans sa limite, la somme non : coupée, et dite (audit du 25/09/2026, n° 8).
+        $errors[] = ['scope' => 'packages', 'reason' => 'packages truncated'];
+        $packages = array_slice($packages, 0, LAMPARO_MAX_PACKAGES);
+    }
+    $facts['packages'] = $packages;
 
     // Détection CMS, dans l'ordre des marqueurs les plus fiables.
     $detectors = [
@@ -608,6 +615,7 @@ function lamparo_detect_wordpress(array $root, array &$errors): ?array
             ],
             'components' => array_merge(
                 lamparo_scan_wp_plugins($content . '/plugins', $errors),
+                lamparo_scan_wp_plugins($content . '/mu-plugins', $errors, true),
                 lamparo_scan_wp_themes($content . '/themes', $errors)
             ),
         ];
@@ -616,16 +624,33 @@ function lamparo_detect_wordpress(array $root, array &$errors): ?array
     return null;
 }
 
-function lamparo_scan_wp_plugins(string $dir, array &$errors): array
+/**
+ * Les extensions d'un dossier de plugins : un dossier avec son fichier principal, ou un fichier PHP seul à la racine
+ * du dossier (hello.php), comme WordPress les liste lui-même. Le dossier mu-plugins se lit pareil : ce sont des
+ * extensions à part entière, chargées d'office, et on ne les taisait pas (audit du 25/09/2026, n° 8).
+ */
+function lamparo_scan_wp_plugins(string $dir, array &$errors, bool $mustUse = false): array
 {
     if (!is_dir($dir) || !is_readable($dir)) {
         return [];
     }
 
     $components = [];
-    foreach (lamparo_list_dirs($dir) as $slug) {
-        $pluginDir = $dir . '/' . $slug;
-        $mainFile  = lamparo_find_wp_plugin_file($pluginDir);
+    $entries = @scandir($dir);
+    foreach ($entries === false ? [] : $entries as $entry) {
+        if ($entry === '.' || $entry === '..') {
+            continue;
+        }
+        $path = $dir . '/' . $entry;
+        if (is_dir($path)) {
+            $slug     = $entry;
+            $mainFile = lamparo_find_wp_plugin_file($path);
+        } elseif (is_file($path) && substr($entry, -4) === '.php') {
+            $slug     = substr($entry, 0, -4);
+            $mainFile = $path;
+        } else {
+            continue;
+        }
         if ($mainFile === null) {
             continue;
         }
@@ -636,13 +661,17 @@ function lamparo_scan_wp_plugins(string $dir, array &$errors): array
             continue;
         }
 
-        $components[] = [
+        $component = [
             'type'    => 'plugin',
             'slug'    => $slug,
             'name'    => trim($name),
             'version' => lamparo_match_in_string($header, '/^[ \t\/*#@]*Version:\s*(.+)$/mi'),
-            'source'  => 'plugin-header',
+            'source'  => $mustUse ? 'mu-plugin-header' : 'plugin-header',
         ];
+        if ($mustUse) {
+            $component['must_use'] = true;
+        }
+        $components[] = $component;
 
         if (count($components) >= LAMPARO_MAX_COMPONENTS) {
             $errors[] = ['scope' => 'components', 'reason' => 'truncated'];
@@ -735,17 +764,30 @@ function lamparo_detect_drupal(array $root, array &$errors): ?array
     $components  = [];
 
     // Le dossier dit l'origine : Drupal range le contribué et le sur-mesure à part. On remonte le fait, pas un avis.
-    $folders = [
-        ['/modules/contrib', 'module', 'contrib'],
-        ['/modules/custom',  'module', 'custom'],
-        ['/themes/contrib',  'theme',  'contrib'],
-        ['/themes/custom',   'theme',  'custom'],
-    ];
-    foreach ($folders as $folder) {
-        $components = array_merge(
-            $components,
-            lamparo_scan_drupal_infos($drupalRoot . $folder[0], $folder[1], $folder[2], $errors)
-        );
+    // Drupal lit modules/ et themes/ en entier, leurs sous-dossiers contrib/ et custom/ compris, puis chaque
+    // sites/*/modules et sites/*/themes : on lit les mêmes emplacements (audit du 25/09/2026, n° 8). Un composant
+    // posé directement dans modules/ n'a pas de dossier pour dire son origine : « root », et sa signature drupal.org
+    // (project:) dira le reste.
+    $bases = [$drupalRoot];
+    foreach (lamparo_list_dirs($drupalRoot . '/sites') as $siteDir) {
+        if (is_dir($drupalRoot . '/sites/' . $siteDir . '/modules') || is_dir($drupalRoot . '/sites/' . $siteDir . '/themes')) {
+            $bases[] = $drupalRoot . '/sites/' . $siteDir;
+        }
+    }
+    $seen = [];
+    foreach ($bases as $base) {
+        foreach (['module' => '/modules', 'theme' => '/themes'] as $type => $folder) {
+            foreach ([['/contrib', 'contrib'], ['/custom', 'custom'], ['', 'root']] as [$sub, $origin]) {
+                foreach (lamparo_scan_drupal_infos($base . $folder . $sub, $type, $origin, $errors, $sub === '' ? ['contrib', 'custom'] : []) as $component) {
+                    $key = $component['type'] . '/' . $component['slug'];
+                    if (isset($seen[$key])) {
+                        continue;
+                    }
+                    $seen[$key] = true;
+                    $components[] = $component;
+                }
+            }
+        }
     }
 
     return [
@@ -758,7 +800,7 @@ function lamparo_detect_drupal(array $root, array &$errors): ?array
     ];
 }
 
-function lamparo_scan_drupal_infos(string $dir, string $type, string $origin, array &$errors): array
+function lamparo_scan_drupal_infos(string $dir, string $type, string $origin, array &$errors, array $skip = []): array
 {
     if (!is_dir($dir) || !is_readable($dir)) {
         return [];
@@ -766,6 +808,9 @@ function lamparo_scan_drupal_infos(string $dir, string $type, string $origin, ar
 
     $components = [];
     foreach (lamparo_list_dirs($dir) as $slug) {
+        if (in_array($slug, $skip, true)) {
+            continue; // contrib/ et custom/ sont des rangements, pas des modules : lus à part
+        }
         $infoFile = $dir . '/' . $slug . '/' . $slug . '.info.yml';
         if (!is_file($infoFile)) {
             continue;
