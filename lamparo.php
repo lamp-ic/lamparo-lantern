@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.14.1
+ * @version 0.14.2
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.14.1');
+define('LAMPARO_PROBE_VERSION', '0.14.2');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -775,6 +775,12 @@ function lamparo_detect_drupal(array $root, array &$errors): ?array
         return is_dir($drupalRoot . '/sites/' . $siteDir . '/modules') || is_dir($drupalRoot . '/sites/' . $siteDir . '/themes');
     });
     usort($siteDirs, static fn (string $a, string $b): int => ($a === 'default' ? -1 : ($b === 'default' ? 1 : strcmp($a, $b))));
+    // Plusieurs sites avec leurs propres modules : la lanterne ne sait pas lequel sert cette adresse (c'est
+    // sites.php et l'hôte qui décident, à l'exécution). L'inventaire ci-dessous prend « default », et le dit
+    // incomplet : rien ne se résout dessus, la page dit que la comparaison l'est (second retour de l'audit, n° 8).
+    if (count($siteDirs) > 1) {
+        $errors[] = ['scope' => 'components', 'reason' => 'multisite ambiguous'];
+    }
     $bases = [];
     foreach ($siteDirs as $siteDir) {
         $bases[] = [$drupalRoot . '/sites/' . $siteDir, $siteDir];
