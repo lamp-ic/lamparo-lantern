@@ -24,13 +24,13 @@
  *   3. LISTE BLANCHE — ne collecte que les faits énumérés dans lamparo_collect().
  *   4. MUETTE SANS SIGNATURE — toute requête invalide reçoit un 404 vide.
  *
- * @version 0.14.2
+ * @version 0.14.3
  * @license MIT — lamp (lamp-ic.fr). Publiée sur packagist : composer require lamparo/lantern
  */
 
 declare(strict_types=1);
 
-define('LAMPARO_PROBE_VERSION', '0.14.2');
+define('LAMPARO_PROBE_VERSION', '0.14.3');
 
 /** Tolérance d'horloge, en secondes. */
 define('LAMPARO_MAX_SKEW', 300);
@@ -771,14 +771,19 @@ function lamparo_detect_drupal(array $root, array &$errors): ?array
     // Drupal donne la priorité au dossier du site (sites/<site>/modules) sur la racine (modules/) : on lit dans cet
     // ordre et le premier trouvé gagne, comme Drupal (retour de l'audit, n° 8). « default » d'abord, puis les autres
     // sites par ordre alphabétique ; chaque composant d'un dossier de site dit lequel (« site »).
-    $siteDirs = array_filter(lamparo_list_dirs($drupalRoot . '/sites'), static function (string $siteDir) use ($drupalRoot): bool {
-        return is_dir($drupalRoot . '/sites/' . $siteDir . '/modules') || is_dir($drupalRoot . '/sites/' . $siteDir . '/themes');
+    // Un site, c'est un dossier de sites/ avec son settings.php ; ses modules et thèmes, s'il en a. Plusieurs sites
+    // installés : la lanterne ne sait pas lequel sert cette adresse (sites.php et l'hôte décident, à l'exécution).
+    // L'inventaire prend « default », le dit incomplet, et marque chaque composant incertain : un composant dont
+    // la copie active n'est pas établie ne sera jamais dit sain (retours de l'audit, n° 8).
+    $installedSites = array_filter(lamparo_list_dirs($drupalRoot . '/sites'), static function (string $siteDir) use ($drupalRoot): bool {
+        return is_file($drupalRoot . '/sites/' . $siteDir . '/settings.php') || is_dir($drupalRoot . '/sites/' . $siteDir . '/modules') || is_dir($drupalRoot . '/sites/' . $siteDir . '/themes');
     });
+    $siteDirs = array_values(array_filter($installedSites, static function (string $siteDir) use ($drupalRoot): bool {
+        return is_dir($drupalRoot . '/sites/' . $siteDir . '/modules') || is_dir($drupalRoot . '/sites/' . $siteDir . '/themes');
+    }));
     usort($siteDirs, static fn (string $a, string $b): int => ($a === 'default' ? -1 : ($b === 'default' ? 1 : strcmp($a, $b))));
-    // Plusieurs sites avec leurs propres modules : la lanterne ne sait pas lequel sert cette adresse (c'est
-    // sites.php et l'hôte qui décident, à l'exécution). L'inventaire ci-dessous prend « default », et le dit
-    // incomplet : rien ne se résout dessus, la page dit que la comparaison l'est (second retour de l'audit, n° 8).
-    if (count($siteDirs) > 1) {
+    $ambiguous = count($installedSites) > 1;
+    if ($ambiguous) {
         $errors[] = ['scope' => 'components', 'reason' => 'multisite ambiguous'];
     }
     $bases = [];
@@ -798,6 +803,9 @@ function lamparo_detect_drupal(array $root, array &$errors): ?array
                     $seen[$key] = true;
                     if ($siteDir !== null) {
                         $component['site'] = $siteDir;
+                    }
+                    if ($ambiguous) {
+                        $component['uncertain'] = true;
                     }
                     $components[] = $component;
                 }
